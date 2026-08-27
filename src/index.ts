@@ -6,7 +6,8 @@
 import type { Context } from 'cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
-import { appendFileSync, mkdirSync, rmSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -245,15 +246,17 @@ function speakSapi(text: string, log: (m: string) => void): void {
 
 /** edge-tts 合成（晓晓神经网络音质）→ ffmpeg 转 WAV → SoundPlayer 播放。
  * 每次播报用唯一临时文件，并发播报互不干扰；播放结束立刻删除自己的文件。 */
-function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void): void {
+function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, instId?: string): void {
+  log('实例 ' + (instId ?? '?') + ' 开始合成 voice=' + cfg.voice + ' rate=' + cfg.rate + ' pitch=' + cfg.pitch)
   const tag = Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
   const mp3 = 'C:/Users/Admin/AppData/Local/Temp/dsh-announce-' + tag + '.mp3'
   const wav = 'C:/Users/Admin/AppData/Local/Temp/dsh-announce-' + tag + '.wav'
   const cleanup = (): void => { try { rmSync(mp3, { force: true }); rmSync(wav, { force: true }) } catch {} }
-  // 动态检查 dsh-voice 是否可解析（运行时 import，缺依赖不崩模块加载）
+  // 动态检查 dsh-voice 是否可解析（与合成子进程同解析规则）
+  // import.meta.resolve 在宿主 ESM 上下文解析裸包会误判；createRequire 用 CJS 解析规则可正确找到
   let voiceReady = true
   try {
-    import.meta.resolve('dsh-voice')
+    createRequire(import.meta.url).resolve('dsh-voice')
   } catch {
     voiceReady = false
   }
@@ -267,12 +270,37 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void): 
     "import('dsh-voice').then(async (m) => {",
     "  const buf = await m.synthesizeSpeech({ text: " + JSON.stringify(text) + ", voice: " + JSON.stringify(cfg.voice) + ", rate: " + JSON.stringify(cfg.rate) + ", pitch: " + JSON.stringify(cfg.pitch) + " });",
     "  fs.writeFileSync('" + mp3 + "', buf);",
+    "  fs.writeFileSync('" + mp3 + ".done', 'ok');",
     "  console.log('SPOKE-OK');",
-    "}).catch((e) => { console.error('SPOKE-FAIL', e.message); process.exit(1) })",
+    "}).catch((e) => { fs.writeFileSync('" + mp3 + ".err', (e && e.message) ? e.message : String(e)); process.exit(1) })",
   ].join('\n')
   const syn = spawn(process.execPath, ['--input-type=module', '-e', js], { stdio: 'ignore', detached: true, windowsHide: true, cwd: join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'profiles', 'web') })
   syn.on('error', (e) => log('合成进程启动失败: ' + e.message))
-  setTimeout(() => {
+  // 轮询等待合成完成（mp3 出现），最多 15s；合成失败则放弃
+  let waited = 0
+  const waitForMp3 = setInterval(() => {
+    waited += 250
+    if (existsSync(mp3)) {
+      clearInterval(waitForMp3)
+      runFfmpeg()
+      return
+    }
+    // 合成失败：读错误文件
+    if (existsSync(mp3 + '.err')) {
+      clearInterval(waitForMp3)
+      let errMsg = '未知错误'
+      try { errMsg = readFileSync(mp3 + '.err', 'utf8') } catch {}
+      log('合成失败: ' + errMsg)
+      cleanup()
+      return
+    }
+    if (waited >= 15000) {
+      clearInterval(waitForMp3)
+      log('合成超时（15s 无 mp3），放弃播报')
+      cleanup()
+    }
+  }, 250)
+  function runFfmpeg(): void {
     const ff = spawn('ffmpeg', ['-y', '-i', mp3, '-ar', '24000', '-ac', '1', wav], { stdio: 'ignore', windowsHide: true })
     ff.on('error', (e) => { log('ffmpeg失败: ' + e.message); cleanup() })
     ff.on('close', (code) => {
@@ -283,7 +311,7 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void): 
       // PlaySync 同步阻塞：进程退出 = 播完，立刻删自己的文件
       player.on('close', () => { log('播放完成: ' + wav); cleanup() })
     })
-  }, 4000)
+  }
 }
 
 const BOOT_LOG = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'voice-announcer.log')
@@ -309,7 +337,7 @@ function installVoiceSettings(ctx: AppContext, cfg: ConfigType, entry: Partial<C
     onChange: () => {
       Object.assign(cfg, source())
       // 音色为 auto 时重新解析（用户重置音色后回到界面语言默认）
-      if (cfg.voice === 'auto') cfg.voice = resolveVoiceByLocale(ctx, DEFAULTS.voice)
+      if (cfg.voice === 'auto') cfg.voice = resolveVoiceByLocale(ctx, 'zh-CN-XiaoxiaoNeural')
       log('设置已更新（即时生效）: engine=' + cfg.engine + ' voice=' + cfg.voice + ' enabled=' + cfg.enabled)
     },
   })
@@ -318,14 +346,16 @@ function installVoiceSettings(ctx: AppContext, cfg: ConfigType, entry: Partial<C
 export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   try { appendFileSync(BOOT_LOG, '[' + new Date().toISOString() + '] APPLY v4\n') } catch {}
   // 用户未显式设置音色时，按界面语言选默认音色（设置了就用用户的，永不覆盖）
-  const RESOLVED_VOICE_DEFAULT = resolveVoiceByLocale(ctx, DEFAULTS.voice)
+  // fallback 必须是具体音色（不能是 auto），否则 locale 未设置时会死循环成 auto
+  const RESOLVED_VOICE_DEFAULT = resolveVoiceByLocale(ctx, 'zh-CN-XiaoxiaoNeural')
   const cfg: ConfigType = { ...DEFAULTS, ...config }
   if (cfg.voice === 'auto' || cfg.voice === undefined) {
     cfg.voice = RESOLVED_VOICE_DEFAULT
   }
   const logPath = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'voice-announcer.log');
   const log = (msg: string): void => { try { mkdirSync(join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector'), { recursive: true }); appendFileSync(logPath, '[' + new Date().toISOString() + '] ' + msg + '\n') } catch {} };
-  log('插件启动，enabled=' + cfg.enabled + ' engine=' + cfg.engine);
+  const instId = Math.random().toString(36).slice(2, 8)
+  log('插件启动（实例 ' + instId + '），enabled=' + cfg.enabled + ' engine=' + cfg.engine);
   installVoiceSettings(ctx, cfg, config, log);
 
   // 试听路由：POST /voice-announcer/preview {voice, text?} → 合成 mp3 返回（client 浏览器播放）
@@ -387,6 +417,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   (ctx.on as any)('session/event', (session: any, event: any) => {
     try {
       if (event?.type !== 'turn/end') return;
+      log('实例 ' + instId + ' 收到 turn/end turn=' + String(event?.data?.turn ?? '?'))
       if (!cfg.enabled) return;
       // 子代理会话：默认不播报（可配置 announceSubagent 开启）
       if (session?.header?.origin === 'subagent' && !cfg.announceSubagent) {
@@ -400,7 +431,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       const text = summarize(session, event, ctx, cfg.voice);
       log('播报 turn=' + String(event?.data?.turn ?? '?') + ' 引擎=' + cfg.engine + ' 文本=' + text.slice(0, 40));
       if (cfg.engine === 'sapi') speakSapi(text, log)
-      else speakEdgeTts(text, cfg, log)
+      else speakEdgeTts(text, cfg, log, instId)
     } catch (e) {
       log('监听器异常: ' + (e instanceof Error ? e.message : String(e)))
     }
