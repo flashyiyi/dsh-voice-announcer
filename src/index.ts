@@ -1,16 +1,16 @@
 /**
  * dsh-voice-announcer — 对话轮结束语音播报守护插件（事件驱动）。
  * 监听 turn/end；完成时取摘要，按配置引擎播报（edge-tts 晓晓 / sapi 本地）。
- * 稳定版：只依赖 node 内置模块 + 运行时动态加载 dsh-voice，模块加载永不被依赖缺失卡死。
+ * 零第三方依赖：edge-tts 协议内置（自研 WebSocket 客户端），播放走 ffplay 流式 stdin。
  */
 import type { Context } from 'cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
-import { createRequire } from 'node:module'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { synthesizeSpeech, synthesizeSpeechStream } from './edge-tts.js'
 
 type AppContext = Context & { sessions: any; sessionProjections?: any; webServer?: any }
 
@@ -245,8 +245,6 @@ function summarize(session: any, event: any, ctx?: AppContext, voice?: string): 
   return '这轮对话结束了'
 }
 
-const Q = String.fromCharCode(39)
-
 /** SAPI 本地朗读（最可靠，离线，音质一般）。 */
 function speakSapi(text: string, log: (m: string) => void): void {
   const ps = 'Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak($env:DSH_SPEAK_TEXT)'
@@ -254,74 +252,45 @@ function speakSapi(text: string, log: (m: string) => void): void {
   child.on('error', (e) => log('SAPI spawn失败: ' + e.message))
 }
 
-/** edge-tts 合成（晓晓神经网络音质）→ ffmpeg 转 WAV → SoundPlayer 播放。
- * 每次播报用唯一临时文件，并发播报互不干扰；播放结束立刻删除自己的文件。 */
+/** edge-tts 流式合成（内置协议，零依赖）→ ffplay 从 stdin 边收边播。
+ * 每块音频到达立即写入 ffplay 的 stdin，合成完成即关闭输入（无临时文件、无转码）。
+ * ffplay 不可用时降级 SAPI 播报。 */
 function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, instId?: string): void {
-  log('实例 ' + (instId ?? '?') + ' 开始合成 voice=' + cfg.voice + ' rate=' + cfg.rate + ' pitch=' + cfg.pitch)
-  const tag = Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
-  const mp3 = 'C:/Users/Admin/AppData/Local/Temp/dsh-announce-' + tag + '.mp3'
-  const wav = 'C:/Users/Admin/AppData/Local/Temp/dsh-announce-' + tag + '.wav'
-  const cleanup = (): void => { try { rmSync(mp3, { force: true }); rmSync(wav, { force: true }) } catch {} }
-  // 动态检查 dsh-voice 是否可解析（与合成子进程同解析规则）
-  // import.meta.resolve 在宿主 ESM 上下文解析裸包会误判；createRequire 用 CJS 解析规则可正确找到
-  let voiceReady = true
-  try {
-    createRequire(import.meta.url).resolve('dsh-voice')
-  } catch {
-    voiceReady = false
-  }
-  if (!voiceReady) {
-    log('dsh-voice 未安装（peer 依赖），降级 SAPI。请先安装：pnpm add dsh-voice')
+  log('实例 ' + (instId ?? '?') + ' 开始流式合成 voice=' + cfg.voice + ' rate=' + cfg.rate + ' pitch=' + cfg.pitch)
+  let aborted = false
+  const player = spawn('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet', '-i', '-'], {
+    stdio: ['pipe', 'ignore', 'pipe'],
+    windowsHide: true,
+  })
+  let stderrBuf = ''
+  player.stderr?.on('data', (d: Buffer) => { stderrBuf += String(d) })
+  player.on('error', (e) => {
+    aborted = true
+    log('ffplay 启动失败: ' + e.message + '（请安装 ffmpeg/ffplay，或切换引擎为 sapi）')
     speakSapi(text, log)
-    return
-  }
-  const js = [
-    "const fs = await import('node:fs');",
-    "import('dsh-voice').then(async (m) => {",
-    "  const buf = await m.synthesizeSpeech({ text: " + JSON.stringify(text) + ", voice: " + JSON.stringify(cfg.voice) + ", rate: " + JSON.stringify(cfg.rate) + ", pitch: " + JSON.stringify(cfg.pitch) + " });",
-    "  fs.writeFileSync('" + mp3 + "', buf);",
-    "  fs.writeFileSync('" + mp3 + ".done', 'ok');",
-    "  console.log('SPOKE-OK');",
-    "}).catch((e) => { fs.writeFileSync('" + mp3 + ".err', (e && e.message) ? e.message : String(e)); process.exit(1) })",
-  ].join('\n')
-  const syn = spawn(process.execPath, ['--input-type=module', '-e', js], { stdio: 'ignore', detached: true, windowsHide: true, cwd: join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'profiles', 'web') })
-  syn.on('error', (e) => log('合成进程启动失败: ' + e.message))
-  // 轮询等待合成完成（mp3 出现），最多 15s；合成失败则放弃
-  let waited = 0
-  const waitForMp3 = setInterval(() => {
-    waited += 250
-    if (existsSync(mp3)) {
-      clearInterval(waitForMp3)
-      runFfmpeg()
-      return
-    }
-    // 合成失败：读错误文件
-    if (existsSync(mp3 + '.err')) {
-      clearInterval(waitForMp3)
-      let errMsg = '未知错误'
-      try { errMsg = readFileSync(mp3 + '.err', 'utf8') } catch {}
-      log('合成失败: ' + errMsg)
-      cleanup()
-      return
-    }
-    if (waited >= 15000) {
-      clearInterval(waitForMp3)
-      log('合成超时（15s 无 mp3），放弃播报')
-      cleanup()
-    }
-  }, 250)
-  function runFfmpeg(): void {
-    const ff = spawn('ffmpeg', ['-y', '-i', mp3, '-ar', '24000', '-ac', '1', wav], { stdio: 'ignore', windowsHide: true })
-    ff.on('error', (e) => { log('ffmpeg失败: ' + e.message); cleanup() })
-    ff.on('close', (code) => {
-      if (code !== 0) { log('ffmpeg退出 code=' + String(code)); cleanup(); return }
-      const ps = 'Add-Type -AssemblyName System.Media; $p = New-Object System.Media.SoundPlayer(' + Q + wav + Q + '); $p.PlaySync()'
-      const player = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], { stdio: 'ignore', windowsHide: true })
-      player.on('error', (e) => { log('播放进程启动失败: ' + e.message); cleanup() })
-      // PlaySync 同步阻塞：进程退出 = 播完，立刻删自己的文件
-      player.on('close', () => { log('播放完成: ' + wav); cleanup() })
-    })
-  }
+  })
+  player.stdin?.on('error', (e) => { log('播放输入流写入失败: ' + e.message) })
+  synthesizeSpeechStream(
+    { text, voice: cfg.voice, rate: cfg.rate, pitch: cfg.pitch },
+    (chunk) => {
+      if (aborted) return
+      try {
+        player.stdin?.write(chunk)
+      } catch (e) {
+        log('写播放流失败: ' + (e instanceof Error ? e.message : String(e)))
+      }
+    },
+  ).then(() => {
+    try { player.stdin?.end() } catch { /* 忽略 */ }
+    log('合成完成，播放输入已关闭')
+  }).catch((e) => {
+    aborted = true
+    log('合成失败: ' + (e instanceof Error ? e.message : String(e)))
+    try { player.kill() } catch { /* 忽略 */ }
+  })
+  player.on('close', (code) => {
+    log('播放结束 code=' + String(code) + (stderrBuf ? ' stderr=' + stderrBuf.trim().slice(0, 200) : ''))
+  })
 }
 
 const BOOT_LOG = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'voice-announcer.log')
@@ -399,8 +368,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
         const lang = m2 ? m2[1].toLowerCase() : 'zh'
         text = PREVIEW_TEXTS[lang] ?? PREVIEW_TEXTS.zh
       }
-      const m: any = await import('dsh-voice')
-      const buf: Buffer = await m.synthesizeSpeech({ text, voice, rate, pitch })
+      const buf: Buffer = await synthesizeSpeech({ text, voice, rate, pitch })
       res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': String(buf.length), 'cache-control': 'no-store' })
       res.end(buf)
     } catch (e) {

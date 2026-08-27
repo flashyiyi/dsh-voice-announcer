@@ -53,35 +53,7 @@ link_pkg @deepseek-ai/dsh-tools packages/core/tools
 link_pkg @deepseek-ai/dsh-llm packages/llm/llm
 link_pkg @deepseek-ai/dsh-system-prompt packages/core/system-prompt
 link_pkg @deepseek-ai/dsh-settings packages/settings/settings
-# 第三方 npm 依赖：从 web profile 的 node_modules 链接（dsh-voice 的 edge-tts）
-if [ -d "$HOME/.dsh/profiles/web/node_modules/dsh-voice" ]; then
-  node -e "
-    const fs = require('fs');
-    const path = require('path');
-    const link = path.resolve(process.argv[1]);
-    const target = path.resolve(process.argv[2]);
-    fs.rmSync(link, { recursive: true, force: true });
-    fs.mkdirSync(path.dirname(link), { recursive: true });
-    fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
-  " "node_modules/dsh-voice" "$HOME/.dsh/profiles/web/node_modules/dsh-voice"
-  # ws + https-proxy-agent 也需可解析（edge-tts 依赖）
-  node -e "
-    const fs = require('fs');
-    const path = require('path');
-    const link = path.resolve(process.argv[1]);
-    const target = path.resolve(process.argv[2]);
-    fs.rmSync(link, { recursive: true, force: true });
-    fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
-  " "node_modules/ws" "$HOME/.dsh/profiles/web/node_modules/ws"
-  node -e "
-    const fs = require('fs');
-    const path = require('path');
-    const link = path.resolve(process.argv[1]);
-    const target = path.resolve(process.argv[2]);
-    fs.rmSync(link, { recursive: true, force: true });
-    fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
-  " "node_modules/https-proxy-agent" "$HOME/.dsh/profiles/web/node_modules/https-proxy-agent"
-fi
+# 无第三方运行时依赖：edge-tts 协议内置（Node 22 全局 WebSocket），播放走 ffplay
 # @types/node（编译类型；checkout 自带）
 link_pkg @types/node node_modules/@types/node
 

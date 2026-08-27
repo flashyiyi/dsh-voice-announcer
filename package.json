@@ -1,7 +1,7 @@
 {
   "name": "dsh-voice-announcer",
   "version": "0.0.1",
-  "description": "任务完成时用 edge-tts 语音播报摘要",
+  "description": "对话结束语音播报：会话名+轮数+结果（edge-tts 流式 / SAPI）",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -17,13 +17,11 @@
     "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0 || >=0.1.1-rc.1 <0.2.0-0",
     "@deepseek-ai/dsh-client-ui-settings": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0 || >=0.1.1-rc.1 <0.2.0-0",
     "cordis": ">=4.0.0-rc.1 <4.1.0-0 || >=4.1.0-rc.1 <5.0.0-0",
-    "schemastery": "^3.18.0",
-    "dsh-voice": ">=0.1.0"
+    "schemastery": "^3.18.0"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
     "typescript": "^5.9.0",
-    "dsh-voice": "0.1.1",
     "tsdown": "^0.22.14"
   },
   "scripts": {

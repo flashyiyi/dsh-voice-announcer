@@ -12,24 +12,22 @@ DSH（DeepSeek Harness）语音播报插件：监听每个会话的 `turn/end` �
 - **Web 设置界面**：在 设置 → 插件配置 中完成全部配置，保存后即时生效，无需改配置文件
 - **音色试听**：音色下拉旁提供「试听」按钮，按当前语速与音调合成示例语音
 - **双引擎**：edge-tts（神经网络音质，需联网）/ sapi（Windows 本地语音，离线可用）
-- **并发安全**：每次播报使用独立临时文件、播完即删；多会话同时完成互不干扰、不丢播报
+- **流式播放**：边合成边播放，无临时文件、无转码；首字约 0.6 秒内出声
+- **并发安全**：每次播报相互独立；多会话同时完成互不干扰、不丢播报
 
 ## 安装
 
 ```bash
-# 1. 安装 dsh-voice（edge-tts 合成引擎，peer 依赖）
-dsh plugin --profile web add dsh-voice
-
-# 2. 安装本插件
 dsh plugin --profile web add dsh-voice-announcer
 ```
 
-> 未安装 dsh-voice 时自动降级为 Windows 本地 SAPI 语音（可出声、音质一般），日志会给出提示。
+> edge-tts 合成引擎已内置（零第三方 npm 依赖）。
 
 ### 其他依赖
 
-- **ffmpeg**（edge-tts 模式的 MP3→WAV 转换）：`winget install ffmpeg`
-- Windows 系统（使用 SoundPlayer 播放）
+- **ffplay**（edge-tts 模式的流式播放）：`winget install ffmpeg`（自带 ffplay）
+- **Node.js ≥ 22**（edge-tts 模式；内置 WebSocket 客户端无需任何外部包）
+- Windows 系统（sapi 引擎）
 
 ## 配置
 
@@ -86,7 +84,7 @@ dsh plugin --profile web add dsh-voice-announcer
 ## 行为
 
 - 子代理会话默认不播报（可通过 `announceSubagent` 开启）
-- 每次播报使用独立临时文件、播完即删，并发播报互不干扰、不丢播报
+- 每次播报边合成边流式播放，无临时文件、无转码；ffplay 缺失时自动降级 SAPI
 - 出错时附带错误信息（截取前 60 字）；中止时区分「你中止」与「父代理中止」
 
 ## 开发

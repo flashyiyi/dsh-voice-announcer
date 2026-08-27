@@ -12,24 +12,22 @@ A voice announcement plugin for DSH (DeepSeek Harness). It listens for each sess
 - **Web settings UI** — configure everything in Settings → Plugin configuration; changes apply live, no config-file editing
 - **Voice preview** — a "Preview" button next to the voice picker synthesizes a sample using the current rate and pitch
 - **Two engines** — edge-tts (neural voices, requires network) or sapi (offline Windows voices)
-- **Concurrency-safe** — each announcement uses a unique temp file deleted after playback; concurrent sessions never drop or interfere with announcements
+- **Streaming playback** — audio plays as it is synthesized (no temp files, no conversion); the first syllable arrives within ~0.6s
+- **Concurrency-safe** — each announcement is independent; concurrent sessions never drop or interfere with announcements
 
 ## Install
 
 ```bash
-# 1. Install dsh-voice (edge-tts engine, peer dependency)
-dsh plugin --profile web add dsh-voice
-
-# 2. Install this plugin
 dsh plugin --profile web add dsh-voice-announcer
 ```
 
-> When dsh-voice is missing, the plugin falls back to the Windows SAPI voice (audible, lower quality) and logs a hint.
+> The edge-tts engine is built into the plugin (zero third-party npm dependencies).
 
 ### Other dependencies
 
-- **ffmpeg** (MP3→WAV conversion for edge-tts mode): `winget install ffmpeg`
-- Windows (uses SoundPlayer for playback)
+- **ffplay** (streaming playback for edge-tts mode): `winget install ffmpeg` (bundles ffplay)
+- **Node.js ≥ 22** (edge-tts mode; the built-in WebSocket client requires no external packages)
+- Windows (SAPI engine)
 
 ## Configuration
 
@@ -86,7 +84,7 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 ## Behavior
 
 - Subagent sessions are not announced by default (enable via `announceSubagent`)
-- Each announcement uses a unique temp file, deleted right after playback — concurrent announcements never interfere or get dropped
+- Each announcement is synthesized and streamed straight to the player — no temp files, no conversion; if ffplay is missing it falls back to SAPI
 - Error messages are included (truncated to 60 characters); aborts distinguish "by you" from "by the parent agent"
 
 ## Development

@@ -30,7 +30,7 @@ interface VoiceAnnouncerSettings {
   announceSubagent?: boolean
 }
 
-/** dsh-voice 支持的音色（VOICES 全集）。 */
+/** edge-tts 常用音色（与「自动」并列，可试听）。 */
 const VOICES = [
   'zh-CN-XiaoxiaoNeural', 'zh-CN-XiaoyiNeural', 'zh-CN-YunxiNeural', 'zh-CN-YunyangNeural', 'zh-CN-YunjianNeural',
   'zh-CN-liaoning-XiaobeiNeural', 'zh-CN-shaanxi-XiaoniNeural',
@@ -55,7 +55,7 @@ interface FieldDef {
 }
 const FIELDS: FieldDef[] = [
   { key: 'enabled', label: '启用播报', hint: '关闭后不再播报任何对话结束通知', type: 'bool' },
-  { key: 'engine', label: '播报引擎', hint: 'edge-tts：神经网络音质，需联网与 ffmpeg；sapi：Windows 本地语音，离线可用', type: 'select', options: ['edge-tts', 'sapi'] },
+  { key: 'engine', label: '播报引擎', hint: 'edge-tts：神经网络音质，需联网与 ffplay（随 ffmpeg 安装）；sapi：Windows 本地语音，离线可用', type: 'select', options: ['edge-tts', 'sapi'] },
   { key: 'voice', label: '音色', hint: '「自动」跟随界面语言；其余为 edge-tts 音色，可试听', type: 'select', options: ['auto', ...VOICES] },
   { key: 'rate', label: '语速', hint: '相对正常语速的偏移（-50% ~ +50%）', type: 'slider', min: -50, max: 50, step: 5, suffix: '%' },
   { key: 'pitch', label: '音调', hint: '相对正常音调的偏移（-50Hz ~ +50Hz）', type: 'slider', min: -50, max: 50, step: 5, suffix: 'Hz' },
