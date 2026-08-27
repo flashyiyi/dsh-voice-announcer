@@ -80,7 +80,7 @@ const v = {
   err: 'var(--dsw-alias-label-error)',
 }
 
-function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings>; useSessions: <S>(sel: (s: { current?: string }) => S) => S }) {
+function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings> }) {
   const { scope } = props
   const [snap, setSnap] = useState(scope.getSnapshot())
   const [open, setOpen] = useState(false)
@@ -92,15 +92,6 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
   dirtyRef.current = Object.keys(draft).length > 0
 
   useEffect(() => scope.subscribe(() => { setSnap(scope.getSnapshot()) }), [scope])
-  // 当前活动会话 id（全局 slot 框架注入）；变化时上报 host，供「仅当前活动会话」判定
-  const currentSessionId = props.useSessions((s) => s.current)
-  useEffect(() => {
-    void fetch('/voice-announcer/active', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: currentSessionId ?? null }),
-    }).catch(() => {})
-  }, [currentSessionId])
 
   const value = (snap.status === 'ready' ? snap.value : {}) as Partial<VoiceAnnouncerSettings>
   const user = (snap.status === 'ready' ? snap.user : undefined) as Record<string, unknown> | undefined
@@ -300,6 +291,27 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
 }
 
 export function apply(ctx: ClientContext): void {
+  // 常驻上报当前活动会话（不依赖设置页挂载）：host 的「仅当前活动会话」判定数据源。
+  // 订阅 sessions 列表快照，current 变化即 POST /voice-announcer/active。
+  try {
+    const list = (ctx as { sessions?: { list?: { getSnapshot(): { current?: string }; subscribe(fn: () => void): () => void } } }).sessions?.list
+    if (list && typeof list.getSnapshot === 'function' && typeof list.subscribe === 'function') {
+      const report = (): void => {
+        try {
+          const current = list.getSnapshot().current
+          void fetch('/voice-announcer/active', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: typeof current === 'string' && current ? current : null }),
+          }).catch(() => {})
+        } catch { /* 上报失败静默 */ }
+      }
+      report()
+      const unsubscribe = list.subscribe(report)
+      ctx.on('dispose', unsubscribe)
+    }
+  } catch { /* sessions 不可用：activeOnly 判定回退（host 端无 activeSessionId 时不念） */ }
+
   const scope = ctx.settingsScope.bind<VoiceAnnouncerSettings>({ namespace: NS })
 
   ctx.effect(() => ctx.slots.inject('settings.plugin.item', () =>
