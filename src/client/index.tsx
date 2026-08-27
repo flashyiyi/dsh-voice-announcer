@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-voice-announcer — client 配置卡片。
+ * dsh-voice-announcer — client 配置卡片。
  * 注册 settings.plugin.item（key=voice-announcer）。样式复刻官方
  * ui-settings-plugins 的 PluginCard + fields（CSS 变量一致）。
  */
@@ -15,7 +15,7 @@ type ClientContext = {
 
 export const inject = ['slots', 'settingsScope']
 
-export const name = '@dsh-external/dsh-voice-announcer'
+export const name = 'dsh-voice-announcer'
 
 const NS = 'voice-announcer'
 

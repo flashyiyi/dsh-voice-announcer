@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-voice-announcer — 对话轮结束语音播报守护插件（事件驱动）。
+ * dsh-voice-announcer — 对话轮结束语音播报守护插件（事件驱动）。
  * 监听 turn/end；完成时取摘要，按配置引擎播报（edge-tts 晓晓 / sapi 本地）。
  * 稳定版：只依赖 node 内置模块 + 运行时动态加载 dsh-voice，模块加载永不被依赖缺失卡死。
  */
@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process'
 
 type AppContext = Context & { sessions: any; sessionProjections?: any; webServer?: any }
 
-export const name = '@dsh-external/dsh-voice-announcer'
+export const name = 'dsh-voice-announcer'
 export const inject = ['sessions', 'sessionProjections']
 
 export interface Config {

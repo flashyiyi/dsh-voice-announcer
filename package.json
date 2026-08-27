@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-external/dsh-voice-announcer",
+  "name": "dsh-voice-announcer",
   "version": "0.0.1",
   "description": "任务完成时用 edge-tts 语音播报摘要",
   "type": "module",
@@ -54,5 +54,10 @@
       ],
       "platform": "web"
     }
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flashyiyi/dsh-voice-announcer.git"
+  },
+  "homepage": "https://github.com/flashyiyi/dsh-voice-announcer#readme"
 }
