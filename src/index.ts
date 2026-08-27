@@ -272,10 +272,18 @@ function speakSapi(text: string, log: (m: string) => void): void {
 
 /** edge-tts 流式合成（内置协议，零依赖）→ ffplay 从 stdin 边收边播。
  * 每块音频到达立即写入 ffplay 的 stdin，合成完成即关闭输入（无临时文件、无转码）。
- * ffplay 不可用时降级 SAPI 播报。 */
+ * ffplay 不可用时降级 SAPI 播报。
+ * 完成通知（onDone）：ffplay close 一律触发（播完/崩溃/合成失败/被打断），
+ * finished 防重；句子播放队列靠它恢复，避免合成失败后 livePlaying 卡死。 */
 function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, instId?: string, onDone?: () => void): () => void {
   log('实例 ' + (instId ?? '?') + ' 开始流式合成 voice=' + cfg.voice + ' rate=' + cfg.rate + ' pitch=' + cfg.pitch)
   let aborted = false
+  let finished = false
+  const finish = (): void => {
+    if (finished) return
+    finished = true
+    onDone?.()
+  }
   const player = spawn('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet', '-i', '-'], {
     stdio: ['pipe', 'ignore', 'pipe'],
     windowsHide: true,
@@ -286,6 +294,7 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, i
     aborted = true
     log('ffplay 启动失败: ' + e.message + '（请安装 ffmpeg/ffplay，或切换引擎为 sapi）')
     speakSapi(text, log)
+    finish()
   })
   player.stdin?.on('error', (e) => { log('播放输入流写入失败: ' + e.message) })
   synthesizeSpeechStream(
@@ -305,11 +314,13 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, i
     aborted = true
     log('合成失败: ' + (e instanceof Error ? e.message : String(e)))
     try { player.kill() } catch { /* 忽略 */ }
+    // kill 触发 close → finish；极端情况 close 未触发时兜底
+    setTimeout(finish, 1000)
   })
   player.on('close', (code) => {
     log('播放结束 code=' + String(code) + (stderrBuf ? ' stderr=' + stderrBuf.trim().slice(0, 200) : ''))
-    // 正常播完（非被打断）才通知完成，驱动句子播放队列
-    if (!aborted) onDone?.()
+    // 任何结束原因都恢复队列（被打断时 stopLiveRead 已清队，pumpLive 无句可播，安全）
+    finish()
   })
   return () => {
     aborted = true
