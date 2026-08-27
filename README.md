@@ -46,7 +46,7 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
   config:
     enabled: true
     engine: edge-tts        # edge-tts / sapi
-    voice: zh-CN-XiaoxiaoNeural
+    voice: auto              # auto: follow UI language; or a specific voice id
     announceCompleted: true
     announceError: true
     announceSubagent: false  # announce subagent sessions too
@@ -58,7 +58,7 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 | --- | --- | --- |
 | enabled | true | Master switch |
 | engine | edge-tts | Engine; voice/rate/pitch controls are disabled when sapi is selected |
-| voice | zh-CN-XiaoxiaoNeural | Voice id (edge-tts only), see below |
+| voice | auto | Voice id (edge-tts only), see below; `auto` picks by UI language (zh→Xiaoxiao, en→Aria) when unset |
 | rate | +0% | Speech rate (edge-tts), slider -50% ~ +50% |
 | pitch | +0Hz | Speech pitch (edge-tts), slider -50Hz ~ +50Hz |
 | announceCompleted | true | Announce normal completion |

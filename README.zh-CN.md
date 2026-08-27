@@ -46,7 +46,7 @@ dsh plugin --profile web add dsh-voice-announcer
   config:
     enabled: true
     engine: edge-tts        # edge-tts / sapi
-    voice: zh-CN-XiaoxiaoNeural
+    voice: auto              # auto：跟随界面语言；或指定音色 id
     announceCompleted: true
     announceError: true
     announceSubagent: false  # 是否播报子代理会话
@@ -58,7 +58,7 @@ dsh plugin --profile web add dsh-voice-announcer
 | --- | --- | --- |
 | enabled | true | 总开关 |
 | engine | edge-tts | 播报引擎；选择 sapi 时音色/语速/音调控件自动禁用 |
-| voice | zh-CN-XiaoxiaoNeural | 音色 id（仅 edge-tts），见下 |
+| voice | auto | 音色 id（仅 edge-tts），见下；`auto` 按界面语言自动选择（中文→晓晓，英文→Aria），未设置时生效 |
 | rate | +0% | 语速（edge-tts），滑杆 -50% ~ +50% |
 | pitch | +0Hz | 音调（edge-tts），滑杆 -50Hz ~ +50Hz |
 | announceCompleted | true | 对话正常结束时播报 |

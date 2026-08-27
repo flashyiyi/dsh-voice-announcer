@@ -34,7 +34,7 @@ export type ConfigType = Required<Config>
 const DEFAULTS: ConfigType = {
   enabled: true,
   engine: 'edge-tts',
-  voice: 'zh-CN-XiaoxiaoNeural',
+  voice: 'auto',
   rate: '+0%',
   pitch: '+0Hz',
   announceCompleted: true,
@@ -182,6 +182,24 @@ const LANG_TEXTS: Record<string, Record<string, string>> = {
   },
 }
 
+/** 用户界面语言偏好（settings locale.preference；zh/en，未设置时 undefined）。 */
+function userLocale(ctx: AppContext): string | undefined {
+  try {
+    const s = typeof (ctx as any).get === 'function' ? (ctx as any).get('settings') : undefined
+    const loc = s?.get?.('locale') as { preference?: string } | undefined
+    const pref = loc?.preference
+    return pref === 'zh' || pref === 'en' ? pref : undefined
+  } catch { return undefined }
+}
+
+/** 按界面语言解析默认音色：voice 为 auto/未设置时调用。 */
+function resolveVoiceByLocale(ctx: AppContext, fallback: string): string {
+  const loc = userLocale(ctx)
+  if (loc === 'zh') return 'zh-CN-XiaoxiaoNeural'
+  if (loc === 'en') return 'en-US-AriaNeural'
+  return fallback
+}
+
 /** 按 voice 取语言包（默认 zh）。 */
 function langPack(voice: string): Record<string, string> {
   const m = /^([a-z]{2,3})(-|$)/i.exec(voice || '')
@@ -290,6 +308,8 @@ function installVoiceSettings(ctx: AppContext, cfg: ConfigType, entry: Partial<C
     setSource: (current) => { source = current as () => ConfigType },
     onChange: () => {
       Object.assign(cfg, source())
+      // 音色为 auto 时重新解析（用户重置音色后回到界面语言默认）
+      if (cfg.voice === 'auto') cfg.voice = resolveVoiceByLocale(ctx, DEFAULTS.voice)
       log('设置已更新（即时生效）: engine=' + cfg.engine + ' voice=' + cfg.voice + ' enabled=' + cfg.enabled)
     },
   })
@@ -297,7 +317,12 @@ function installVoiceSettings(ctx: AppContext, cfg: ConfigType, entry: Partial<C
 
 export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   try { appendFileSync(BOOT_LOG, '[' + new Date().toISOString() + '] APPLY v4\n') } catch {}
+  // 用户未显式设置音色时，按界面语言选默认音色（设置了就用用户的，永不覆盖）
+  const RESOLVED_VOICE_DEFAULT = resolveVoiceByLocale(ctx, DEFAULTS.voice)
   const cfg: ConfigType = { ...DEFAULTS, ...config }
+  if (cfg.voice === 'auto' || cfg.voice === undefined) {
+    cfg.voice = RESOLVED_VOICE_DEFAULT
+  }
   const logPath = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'voice-announcer.log');
   const log = (msg: string): void => { try { mkdirSync(join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector'), { recursive: true }); appendFileSync(logPath, '[' + new Date().toISOString() + '] ' + msg + '\n') } catch {} };
   log('插件启动，enabled=' + cfg.enabled + ' engine=' + cfg.engine);
