@@ -2,7 +2,6 @@
   "name": "@dsh-external/dsh-voice-announcer",
   "version": "0.0.1",
   "description": "任务完成时用 edge-tts 语音播报摘要",
-  "private": true,
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
