@@ -25,6 +25,8 @@ export interface Config {
   pitch?: string
   announceCompleted?: boolean
   announceError?: boolean
+  /** 子代理（subagent）会话也播报；默认 false（只播主会话） */
+  announceSubagent?: boolean
 }
 
 export type ConfigType = Required<Config>
@@ -37,6 +39,7 @@ const DEFAULTS: ConfigType = {
   pitch: '+0Hz',
   announceCompleted: true,
   announceError: true,
+  announceSubagent: false,
 }
 
 const COMPLETED_KINDS = new Set(['completed', 'error', 'max-tokens', 'aborted', 'interrupted'])
@@ -250,7 +253,7 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void): 
     "}).catch((e) => { console.error('SPOKE-FAIL', e.message); process.exit(1) })",
   ].join('\n')
   const syn = spawn(process.execPath, ['--input-type=module', '-e', js], { stdio: 'ignore', detached: true, windowsHide: true, cwd: join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'profiles', 'web') })
-  syn.on('error', (e) => log('合成spawn失败: ' + e.message))
+  syn.on('error', (e) => log('合成进程启动失败: ' + e.message))
   setTimeout(() => {
     const ff = spawn('ffmpeg', ['-y', '-i', mp3, '-ar', '24000', '-ac', '1', wav], { stdio: 'ignore', windowsHide: true })
     ff.on('error', (e) => { log('ffmpeg失败: ' + e.message); cleanup() })
@@ -258,9 +261,9 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void): 
       if (code !== 0) { log('ffmpeg退出 code=' + String(code)); cleanup(); return }
       const ps = 'Add-Type -AssemblyName System.Media; $p = New-Object System.Media.SoundPlayer(' + Q + wav + Q + '); $p.PlaySync()'
       const player = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], { stdio: 'ignore', windowsHide: true })
-      player.on('error', (e) => { log('播放spawn失败: ' + e.message); cleanup() })
+      player.on('error', (e) => { log('播放进程启动失败: ' + e.message); cleanup() })
       // PlaySync 同步阻塞：进程退出 = 播完，立刻删自己的文件
-      player.on('close', () => { log('已播放: ' + wav); cleanup() })
+      player.on('close', () => { log('播放完成: ' + wav); cleanup() })
     })
   }, 4000)
 }
@@ -277,6 +280,7 @@ const VoiceAnnouncerSettings = z.object({
   pitch: z.string().default(DEFAULTS.pitch),
   announceCompleted: z.boolean().default(DEFAULTS.announceCompleted),
   announceError: z.boolean().default(DEFAULTS.announceError),
+  announceSubagent: z.boolean().default(DEFAULTS.announceSubagent),
 })
 
 /** 接入 settings：有服务则 Web 设置页可改（live 生效），无服务则 entry 配置照常。 */
@@ -286,7 +290,7 @@ function installVoiceSettings(ctx: AppContext, cfg: ConfigType, entry: Partial<C
     setSource: (current) => { source = current as () => ConfigType },
     onChange: () => {
       Object.assign(cfg, source())
-      log('设置已更新(live): engine=' + cfg.engine + ' voice=' + cfg.voice + ' enabled=' + cfg.enabled)
+      log('设置已更新（即时生效）: engine=' + cfg.engine + ' voice=' + cfg.voice + ' enabled=' + cfg.enabled)
     },
   })
 }
@@ -296,7 +300,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   const cfg: ConfigType = { ...DEFAULTS, ...config }
   const logPath = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'voice-announcer.log');
   const log = (msg: string): void => { try { mkdirSync(join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector'), { recursive: true }); appendFileSync(logPath, '[' + new Date().toISOString() + '] ' + msg + '\n') } catch {} };
-  log('插件启动 v4，enabled=' + cfg.enabled + ' engine=' + cfg.engine);
+  log('插件启动，enabled=' + cfg.enabled + ' engine=' + cfg.engine);
   installVoiceSettings(ctx, cfg, config, log);
 
   // 试听路由：POST /voice-announcer/preview {voice, text?} → 合成 mp3 返回（client 浏览器播放）
@@ -359,9 +363,9 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     try {
       if (event?.type !== 'turn/end') return;
       if (!cfg.enabled) return;
-      // 子代理会话不播报（子代理刷屏消失，只播报主会话）
-      if (session?.header?.origin === 'subagent') {
-        log('跳过子代理会话 turn=' + String(event?.data?.turn ?? '?'))
+      // 子代理会话：默认不播报（可配置 announceSubagent 开启）
+      if (session?.header?.origin === 'subagent' && !cfg.announceSubagent) {
+        log('跳过子代理会话（未开启子任务播报） turn=' + String(event?.data?.turn ?? '?'))
         return
       }
       const kind = event?.data?.reason?.kind ?? 'completed';

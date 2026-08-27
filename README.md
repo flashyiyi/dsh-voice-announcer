@@ -2,17 +2,17 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Voice announcement plugin for DSH (DeepSeek Harness): listens to every session's `turn/end` and speaks **session title + round number + outcome** — know which conversation finished and whether it errored without looking at the screen.
+A voice announcement plugin for DSH (DeepSeek Harness). It listens for each session's `turn/end` event and speaks the **session title, round number, and outcome** — so you know which conversation finished and whether it encountered an error, without watching the screen.
 
 ## Features
 
-- **Announcement format**: `Session title: Round N ended` (distinct copy for errors, aborts, truncation, etc.)
-- **8-language announcements**: copy switches automatically by voice language (zh/en/ja/ko/fr/de/ru/es), falls back to Chinese
-- **Subagent silence**: subagent sessions are not announced — no spam, main sessions only
-- **Web settings UI**: configure everything in Settings → Plugin configuration, live-applied, no config file editing
-- **Voice preview**: "Preview" button next to the voice picker, synthesizes with current rate/pitch
-- **Engines**: edge-tts (neural voices, requires internet) / sapi (offline Windows voices)
-- **Concurrency-safe**: unique temp file per announcement, deleted after playback; concurrent sessions never drop announcements
+- **Clear announcements** — `Session title: Round N ended`, with dedicated copy for errors, aborts, truncation, and interruptions
+- **8-language support** — announcement copy switches automatically based on the voice language (Chinese, English, Japanese, Korean, French, German, Russian, Spanish), falling back to Chinese
+- **Subagent control** — subagent sessions are silent by default; enable them with one toggle
+- **Web settings UI** — configure everything in Settings → Plugin configuration; changes apply live, no config-file editing
+- **Voice preview** — a "Preview" button next to the voice picker synthesizes a sample using the current rate and pitch
+- **Two engines** — edge-tts (neural voices, requires network) or sapi (offline Windows voices)
+- **Concurrency-safe** — each announcement uses a unique temp file deleted after playback; concurrent sessions never drop or interfere with announcements
 
 ## Install
 
@@ -24,22 +24,22 @@ dsh plugin --profile web add dsh-voice
 dsh plugin --profile web add dsh-voice-announcer
 ```
 
-> Falls back to Windows local SAPI voice (audible, lower quality) when dsh-voice is missing; the log will tell you.
+> When dsh-voice is missing, the plugin falls back to the Windows SAPI voice (audible, lower quality) and logs a hint.
 
 ### Other dependencies
 
 - **ffmpeg** (MP3→WAV conversion for edge-tts mode): `winget install ffmpeg`
-- Windows (SoundPlayer playback)
+- Windows (uses SoundPlayer for playback)
 
 ## Configuration
 
 ### Option 1: Web settings UI (recommended)
 
-Sidebar **Settings → Plugin configuration → 语音播报**: edits are saved and applied live.
+Open **Settings → Plugin configuration → Voice announcement** in the sidebar. Edits are applied live after saving.
 
 ### Option 2: Config file
 
-Append to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
+Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 
 ```yaml
 - id: dsh-voice-announcer
@@ -49,6 +49,7 @@ Append to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
     voice: zh-CN-XiaoxiaoNeural
     announceCompleted: true
     announceError: true
+    announceSubagent: false  # announce subagent sessions too
 ```
 
 ### Options
@@ -61,38 +62,39 @@ Append to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 | rate | +0% | Speech rate (edge-tts), slider -50% ~ +50% |
 | pitch | +0Hz | Speech pitch (edge-tts), slider -50Hz ~ +50Hz |
 | announceCompleted | true | Announce normal completion |
-| announceError | true | Announce errors/aborts/truncations |
+| announceError | true | Announce errors, aborts, and truncations |
+| announceSubagent | false | Announce subagent sessions too |
 
 ## Voices (edge-tts, 22)
 
 | Language | Voices |
 | --- | --- |
-| Chinese | Xiaoxiao/Xiaoyi/Yunxi/Yunyang/Yunjian (zh-CN-*Neural) |
+| Chinese | Xiaoxiao / Xiaoyi / Yunxi / Yunyang / Yunjian (zh-CN-*Neural) |
 | Dialects | Xiaobei (Liaoning), Xiaoni (Shaanxi) |
 | Cantonese | HiuMaan (zh-HK) |
 | Taiwanese | HsiaoChen (zh-TW) |
-| English | Aria/Jenny/Guy/Davis (en-US), Sonia/Ryan (en-GB) |
-| Japanese | Nanami/Keita (ja-JP) |
+| English | Aria / Jenny / Guy / Davis (en-US), Sonia / Ryan (en-GB) |
+| Japanese | Nanami / Keita (ja-JP) |
 | Korean | SunHi (ko-KR) |
 | French | Denise (fr-FR) |
 | German | Katja (de-DE) |
 | Russian | Svetlana (ru-RU) |
 | Spanish | Elvira (es-ES) |
 
-> Non-CJK voices require text in the matching language (server-side requirement); preview texts are built in per language.
+> Non-CJK voices require the text to be in the matching language (server-side requirement); per-language preview texts are built in.
 
 ## Behavior
 
-- Subagent sessions are never announced (main sessions only)
-- Unique temp file + delete after playback; concurrent announcements never interfere or drop
-- Error messages included (truncated to 60 chars); aborts distinguish "by you" vs "by parent agent"
+- Subagent sessions are not announced by default (enable via `announceSubagent`)
+- Each announcement uses a unique temp file, deleted right after playback — concurrent announcements never interfere or get dropped
+- Error messages are included (truncated to 60 characters); aborts distinguish "by you" from "by the parent agent"
 
 ## Development
 
 ```bash
-# Build host (needs the DSH source checkout's tsc)
+# Build the host (requires the tsc from a DSH source checkout)
 DSH_CHECKOUT=<path-to-dsh-harness> bash scripts/build.sh
-# Build client (web settings card)
+# Build the client (web settings card)
 npx tsdown
 ```
 

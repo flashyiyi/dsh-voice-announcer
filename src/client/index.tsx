@@ -27,6 +27,7 @@ interface VoiceAnnouncerSettings {
   pitch?: string
   announceCompleted?: boolean
   announceError?: boolean
+  announceSubagent?: boolean
 }
 
 /** dsh-voice 支持的音色（VOICES 全集）。 */
@@ -53,13 +54,14 @@ interface FieldDef {
   suffix?: string
 }
 const FIELDS: FieldDef[] = [
-  { key: 'enabled', label: '启用播报', hint: '总开关', type: 'bool' },
-  { key: 'engine', label: '播报引擎', hint: 'edge-tts：晓晓（需联网+ffmpeg）；sapi：本地离线', type: 'select', options: ['edge-tts', 'sapi'] },
-  { key: 'voice', label: '音色', hint: 'edge-tts 神经网络音色', type: 'select', options: VOICES },
-  { key: 'rate', label: '语速', hint: '相对正常语速的偏移', type: 'slider', min: -50, max: 50, step: 5, suffix: '%' },
-  { key: 'pitch', label: '音调', hint: '相对正常音调的偏移', type: 'slider', min: -50, max: 50, step: 5, suffix: 'Hz' },
-  { key: 'announceCompleted', label: '完成时播报', hint: '', type: 'bool' },
-  { key: 'announceError', label: '出错时播报', hint: '出错/中止/截断', type: 'bool' },
+  { key: 'enabled', label: '启用播报', hint: '关闭后不再播报任何对话结束通知', type: 'bool' },
+  { key: 'engine', label: '播报引擎', hint: 'edge-tts：神经网络音质，需联网与 ffmpeg；sapi：Windows 本地语音，离线可用', type: 'select', options: ['edge-tts', 'sapi'] },
+  { key: 'voice', label: '音色', hint: '仅 edge-tts 引擎可用，点击「试听」预览效果', type: 'select', options: VOICES },
+  { key: 'rate', label: '语速', hint: '相对正常语速的偏移（-50% ~ +50%）', type: 'slider', min: -50, max: 50, step: 5, suffix: '%' },
+  { key: 'pitch', label: '音调', hint: '相对正常音调的偏移（-50Hz ~ +50Hz）', type: 'slider', min: -50, max: 50, step: 5, suffix: 'Hz' },
+  { key: 'announceCompleted', label: '完成时播报', hint: '对话正常结束时播报', type: 'bool' },
+  { key: 'announceError', label: '出错时播报', hint: '出错、中止、截断等异常结束时播报', type: 'bool' },
+  { key: 'announceSubagent', label: '子任务也播报', hint: '子代理（subagent）会话默认不播报，开启后一并播报', type: 'bool' },
 ]
 
 /** CSS 变量别名（与官方 dsw-alias 一致）。 */
@@ -162,10 +164,10 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
       >
         <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span style={{ fontSize: 15, fontWeight: 600, lineHeight: '1.4', color: v.label1 }}>语音播报</span>
-          <span style={{ fontSize: 13, lineHeight: '1.5', color: v.label3 }}>任务完成时用 edge-tts / SAPI 语音播报（voice-announcer）</span>
+          <span style={{ fontSize: 13, lineHeight: '1.5', color: v.label3 }}>对话结束时语音播报会话名、轮数与结果（edge-tts / SAPI）</span>
         </span>
         {dirtyRef.current
-          ? <span style={{ flex: 'none', borderRadius: 999, padding: '1px 8px', fontSize: 11, lineHeight: '17px', fontWeight: 500, whiteSpace: 'nowrap', background: 'var(--dsw-alias-bg-module-platform)', color: v.label2 }}>未保存</span>
+          ? <span style={{ flex: 'none', borderRadius: 999, padding: '1px 8px', fontSize: 11, lineHeight: '17px', fontWeight: 500, whiteSpace: 'nowrap', background: 'var(--dsw-alias-bg-module-platform)', color: v.label2 }}>有未保存的修改</span>
           : null}
         <span style={{ flex: 'none', color: v.label3, transition: 'transform .16s', transform: open ? 'rotate(180deg)' : undefined, fontSize: 12 }}>▾</span>
       </button>
@@ -183,7 +185,7 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
                       {ovr
                         ? (
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ borderRadius: 999, padding: '1px 8px', fontSize: 11, lineHeight: '17px', whiteSpace: 'nowrap', fontWeight: 500, background: 'var(--dsw-alias-bg-module-platform)', color: v.label2 }}>已覆盖</span>
+                            <span style={{ borderRadius: 999, padding: '1px 8px', fontSize: 11, lineHeight: '17px', whiteSpace: 'nowrap', fontWeight: 500, background: 'var(--dsw-alias-bg-module-platform)', color: v.label2 }}>已自定义</span>
                             <button type="button" disabled={!writable} onClick={() => stageClear(field.key as string)}
                               style={{ border: 'none', background: 'none', padding: 0, font: 'inherit', fontSize: 12, lineHeight: '1.5', color: v.label2, cursor: 'pointer' }}>重置</button>
                           </span>
@@ -255,7 +257,7 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
               })}
             </div>
             {!writable
-              ? <p style={{ margin: '12px 0 0', fontSize: 12, lineHeight: '1.5', color: v.label3 }}>设置文档为只读，无法修改。</p>
+              ? <p style={{ margin: '12px 0 0', fontSize: 12, lineHeight: '1.5', color: v.label3 }}>设置文档当前为只读，无法修改。</p>
               : null}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 0 4px', borderTop: '1px solid ' + v.border }}>
               {failed
@@ -263,11 +265,11 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
                 : null}
               <button type="button" disabled={!dirtyRef.current || saving} onClick={discard}
                 style={{ appearance: 'none', border: '1px solid ' + v.border, borderRadius: 8, padding: '5px 14px', font: 'inherit', fontSize: 13, lineHeight: '1.5', cursor: 'pointer', background: 'none', color: v.label2, opacity: (!dirtyRef.current || saving) ? 0.4 : 1 }}>
-                放弃
+                放弃修改
               </button>
               <button type="button" disabled={!dirtyRef.current || saving} onClick={commit}
                 style={{ appearance: 'none', border: '1px solid transparent', borderRadius: 8, padding: '5px 14px', font: 'inherit', fontSize: 13, lineHeight: '1.5', cursor: 'pointer', background: v.label1, color: v.bg3, opacity: (!dirtyRef.current || saving) ? 0.4 : 1 }}>
-                {saving ? '保存中…' : '保存'}
+                {saving ? '保存中…' : '保存设置'}
               </button>
             </div>
           </div>
