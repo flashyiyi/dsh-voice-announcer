@@ -28,6 +28,10 @@ export interface Config {
   announceError?: boolean
   /** 子代理（subagent）会话也播报；默认 false（只播主会话） */
   announceSubagent?: boolean
+  /** 实时朗读：回复生成过程中边出边念（仅 edge-tts 引擎，逐句合成流式播放）；默认关闭 */
+  liveRead?: boolean
+  /** 实时朗读只读当前活动会话（前端上报活动会话 id）；默认开启 */
+  liveReadActiveOnly?: boolean
 }
 
 export type ConfigType = Required<Config>
@@ -41,11 +45,25 @@ const DEFAULTS: ConfigType = {
   announceCompleted: true,
   announceError: true,
   announceSubagent: false,
+  liveRead: false,
+  liveReadActiveOnly: true,
 }
 
 const COMPLETED_KINDS = new Set(['completed', 'error', 'max-tokens', 'aborted', 'interrupted'])
 
 function cleanText(s: string): string { return s.replace(/\s+/g, ' ').trim() }
+
+/** 剥离 markdown 符号（实时朗读文本净化：代码块/行内代码/链接/强调/标题/引用符）。 */
+function stripMd(s: string): string {
+  return s
+    .replace(/\`\`\`[\s\S]*?(\`\`\`|$)/g, ' ')
+    .replace(/\`([^\`]*)\`/g, '$1')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[*_~#>\`]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
 /**
  * 标题优先从 sessionProjections 投影读取（官方全量 fold，不扫事件不卡）；
@@ -255,7 +273,7 @@ function speakSapi(text: string, log: (m: string) => void): void {
 /** edge-tts 流式合成（内置协议，零依赖）→ ffplay 从 stdin 边收边播。
  * 每块音频到达立即写入 ffplay 的 stdin，合成完成即关闭输入（无临时文件、无转码）。
  * ffplay 不可用时降级 SAPI 播报。 */
-function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, instId?: string): void {
+function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, instId?: string): () => void {
   log('实例 ' + (instId ?? '?') + ' 开始流式合成 voice=' + cfg.voice + ' rate=' + cfg.rate + ' pitch=' + cfg.pitch)
   let aborted = false
   const player = spawn('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet', '-i', '-'], {
@@ -291,6 +309,10 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, i
   player.on('close', (code) => {
     log('播放结束 code=' + String(code) + (stderrBuf ? ' stderr=' + stderrBuf.trim().slice(0, 200) : ''))
   })
+  return () => {
+    aborted = true
+    try { player.kill() } catch { /* 忽略 */ }
+  }
 }
 
 const BOOT_LOG = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'voice-announcer.log')
@@ -306,6 +328,8 @@ const VoiceAnnouncerSettings = z.object({
   announceCompleted: z.boolean().default(DEFAULTS.announceCompleted),
   announceError: z.boolean().default(DEFAULTS.announceError),
   announceSubagent: z.boolean().default(DEFAULTS.announceSubagent),
+  liveRead: z.boolean().default(DEFAULTS.liveRead),
+  liveReadActiveOnly: z.boolean().default(DEFAULTS.liveReadActiveOnly),
 })
 
 /** 接入 settings：有服务则 Web 设置页可改（live 生效），无服务则 entry 配置照常。 */
@@ -336,6 +360,42 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   const instId = Math.random().toString(36).slice(2, 8)
   log('插件启动（实例 ' + instId + '），enabled=' + cfg.enabled + ' engine=' + cfg.engine);
   installVoiceSettings(ctx, cfg, config, log);
+  // 实时朗读状态（apply 闭包内，每实例独立）
+  let activeSessionId: string | undefined
+  let liveBuf = ''
+  let liveStop: (() => void) | null = null
+  function stopLiveRead(log2: (m: string) => void): void {
+    if (liveStop || liveBuf) log2('打断实时朗读（剩余缓冲 ' + liveBuf.length + ' 字）')
+    try { liveStop?.() } catch { /* 忽略 */ }
+    liveStop = null
+    liveBuf = ''
+  }
+  function feedLive(text: string, log2: (m: string) => void): void {
+    liveBuf += text
+    // 强边界（句号/感叹/问号/分号/换行）整句切出；lookbehind 保留边界在句末
+    const parts = liveBuf.split(/(?<=[。！？!?；;\n])/)
+    const ready: string[] = []
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      const s = stripMd(parts[i])
+      if (s) ready.push(s)
+    }
+    let rest = parts[parts.length - 1] ?? ''
+    // 剩余过长且含弱边界（逗号）：从最后一个弱边界切，避免长句迟迟不念
+    if (rest.length >= 40) {
+      const weak = rest.match(/.*[，、,]/)
+      if (weak) {
+        const s = stripMd(weak[0])
+        if (s) ready.push(s)
+        rest = rest.slice(weak[0].length)
+      }
+    }
+    liveBuf = rest
+    for (const s of ready) {
+      log2('实时朗读句子: ' + s.slice(0, 40))
+      try { liveStop?.() } catch { /* 忽略 */ }
+      liveStop = speakEdgeTts(s, cfg, log2, instId)
+    }
+  }
 
   // 试听路由：POST /voice-announcer/preview {voice, text?} → 合成 mp3 返回（client 浏览器播放）
   // handler 是 async 函数；effect 回调保持同步，返回 disposer
@@ -384,6 +444,30 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
         path: '/voice-announcer/preview',
         handler: previewHandler,
       }), 'voice-announcer: preview api')
+      const activeHandler = async (req: any, res: any): Promise<void> => {
+        try {
+          let raw = ''
+          for await (const chunk of req) raw += String(chunk)
+          let sessionId: string | undefined
+          try {
+            const body = JSON.parse(raw || '{}')
+            const v = body.sessionId
+            sessionId = typeof v === 'string' && v ? v : undefined
+          } catch {}
+          activeSessionId = sessionId
+          log('当前活动会话更新: ' + (activeSessionId ?? '(无)'))
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end('{"ok":true}')
+        } catch (e) {
+          res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end('失败: ' + (e instanceof Error ? e.message : String(e)))
+        }
+      }
+      (ctx as any).effect(() => ws.register({
+        kind: 'prefix',
+        path: '/voice-announcer/active',
+        handler: activeHandler,
+      }), 'voice-announcer: active api')
       log('试听路由已注册')
     } else {
       log('webServer 不可用，试听路由跳过')
@@ -394,7 +478,28 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
 
   (ctx.on as any)('session/event', (session: any, event: any) => {
     try {
-      if (event?.type !== 'turn/end') return;
+      const type = event?.type
+      // 实时朗读：assistant/chunk 的 text-delta 增量 → 句子缓冲 → 流式播放（仅 edge-tts）
+      if (type === 'assistant/chunk' && cfg.enabled && cfg.liveRead && cfg.engine === 'edge-tts') {
+        const chunk = event?.data?.chunk
+        if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text) {
+          // 子代理会话：遵循 announceSubagent
+          if (session?.header?.origin === 'subagent' && !cfg.announceSubagent) return
+          // 只读当前活动会话：前端经 POST /voice-announcer/active 上报
+          if (cfg.liveReadActiveOnly) {
+            const sid = String(session?.id ?? '')
+            if (!sid || !activeSessionId || sid !== activeSessionId) return
+          }
+          feedLive(chunk.text, log)
+        }
+        return
+      }
+      // 新轮开始 / 用户发消息：打断实时朗读
+      if (type === 'turn/start' || type === 'user/message') {
+        stopLiveRead(log)
+        return
+      }
+      if (type !== 'turn/end') return;
       log('实例 ' + instId + ' 收到 turn/end turn=' + String(event?.data?.turn ?? '?'))
       if (!cfg.enabled) return;
       // 子代理会话：默认不播报（可配置 announceSubagent 开启）
@@ -407,6 +512,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       if (kind === 'completed' && !cfg.announceCompleted) return;
       if (kind !== 'completed' && !cfg.announceError) return;
       const text = summarize(session, event, ctx, cfg.voice);
+      stopLiveRead(log)
       log('播报 turn=' + String(event?.data?.turn ?? '?') + ' 引擎=' + cfg.engine + ' 文本=' + text.slice(0, 40));
       if (cfg.engine === 'sapi') speakSapi(text, log)
       else speakEdgeTts(text, cfg, log, instId)

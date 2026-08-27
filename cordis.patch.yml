@@ -9,3 +9,5 @@
         announceCompleted: true
         announceError: true
         announceSubagent: false
+        liveRead: false
+        liveReadActiveOnly: true

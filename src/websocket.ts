@@ -58,9 +58,10 @@ function buildClientFrame(opcode: number, payload: Buffer): Buffer {
  * 事件：open / message({data: string|Buffer}) / close / error。
  */
 export function createWebSocket(url: URL, headers: Record<string, string>): WsSocket {
-  const listeners: { [K in keyof WsEventMap]?: WsEventMap[K][] } = {}
-  const emit = <K extends keyof WsEventMap>(type: K, ...args: Parameters<WsEventMap[K]>): void => {
-    for (const listener of listeners[type] ?? []) (listener as (...a: never[]) => void)(...args as never[])
+  // 宽松 bucket：泛型 K 下索引访问无法精化槽位类型，内部一律 unknown[] + 断言桥接
+  const listeners: Record<string, unknown[]> = {}
+  const emit = (type: string, ...args: unknown[]): void => {
+    for (const listener of listeners[type] ?? []) (listener as (...a: unknown[]) => void)(...args)
   }
   const key = randomBytes(16).toString('base64')
   // https.request 只接受 https: 协议；wss: 与 https: 底层同为 TLS，仅协议名不同
@@ -78,7 +79,7 @@ export function createWebSocket(url: URL, headers: Record<string, string>): WsSo
   })
   let socket: Duplex | undefined
   // 分片重组缓冲
-  let buffer = Buffer.alloc(0)
+  let buffer: Buffer = Buffer.alloc(0)
   let partialOpcode = 0
   let partialChunks: Buffer[] = []
   let closed = false
@@ -202,7 +203,8 @@ export function createWebSocket(url: URL, headers: Record<string, string>): WsSo
       }
     },
     addEventListener<K extends keyof WsEventMap>(type: K, listener: WsEventMap[K]): void {
-      ;(listeners[type] ??= []).push(listener)
+      const bucket = listeners[type] ?? (listeners[type] = [])
+      bucket.push(listener as (...args: unknown[]) => void)
     },
   }
 }

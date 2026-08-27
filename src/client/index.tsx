@@ -28,6 +28,8 @@ interface VoiceAnnouncerSettings {
   announceCompleted?: boolean
   announceError?: boolean
   announceSubagent?: boolean
+  liveRead?: boolean
+  liveReadActiveOnly?: boolean
 }
 
 /** edge-tts 常用音色（与「自动」并列，可试听）。 */
@@ -62,6 +64,8 @@ const FIELDS: FieldDef[] = [
   { key: 'announceCompleted', label: '完成时播报', hint: '对话正常结束时播报', type: 'bool' },
   { key: 'announceError', label: '出错时播报', hint: '出错、中止、截断等异常结束时播报', type: 'bool' },
   { key: 'announceSubagent', label: '子任务也播报', hint: '子代理（subagent）会话默认不播报，开启后一并播报', type: 'bool' },
+  { key: 'liveRead', label: '实时朗读', hint: '生成回复时边出边念（仅 edge-tts，逐句合成流式播放，无需等待完整回复）', type: 'bool' },
+  { key: 'liveReadActiveOnly', label: '仅当前活动会话', hint: '只朗读当前正在查看的会话；关闭则所有会话的回复都实时朗读', type: 'bool' },
 ]
 
 /** CSS 变量别名（与官方 dsw-alias 一致）。 */
@@ -76,7 +80,7 @@ const v = {
   err: 'var(--dsw-alias-label-error)',
 }
 
-function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings> }) {
+function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings>; useSessions: <S>(sel: (s: { current?: string }) => S) => S }) {
   const { scope } = props
   const [snap, setSnap] = useState(scope.getSnapshot())
   const [open, setOpen] = useState(false)
@@ -88,6 +92,15 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
   dirtyRef.current = Object.keys(draft).length > 0
 
   useEffect(() => scope.subscribe(() => { setSnap(scope.getSnapshot()) }), [scope])
+  // 当前活动会话 id（全局 slot 框架注入）；变化时上报 host，供「仅当前活动会话」判定
+  const currentSessionId = props.useSessions((s) => s.current)
+  useEffect(() => {
+    void fetch('/voice-announcer/active', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: currentSessionId ?? null }),
+    }).catch(() => {})
+  }, [currentSessionId])
 
   const value = (snap.status === 'ready' ? snap.value : {}) as Partial<VoiceAnnouncerSettings>
   const user = (snap.status === 'ready' ? snap.user : undefined) as Record<string, unknown> | undefined
@@ -103,9 +116,15 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
     draft[field.key] !== undefined || (user !== undefined && field.key in user)
   /** 当前引擎（草稿优先）。 */
   const engine = String(fieldValue(FIELDS[1]) ?? 'edge-tts')
-  /** sapi 引擎：不支持 voice/rate/pitch（SAPI 用系统语音）。 */
+  /** sapi 引擎：不支持 voice/rate/pitch（SAPI 用系统语音）；实时朗读仅 edge-tts。 */
   const engineIsSapi = engine === 'sapi'
-  const fieldDisabled = (field: FieldDef): boolean => !writable || (engineIsSapi && (field.key === 'voice' || field.key === 'rate' || field.key === 'pitch'))
+  const liveReadOn = fieldValue(FIELDS[8]) === true
+  const fieldDisabled = (field: FieldDef): boolean => {
+    if (!writable) return true
+    if (engineIsSapi && (field.key === 'voice' || field.key === 'rate' || field.key === 'pitch' || field.key === 'liveRead' || field.key === 'liveReadActiveOnly')) return true
+    if (field.key === 'liveReadActiveOnly' && liveReadOn !== true) return true
+    return false
+  }
 
   const parseNum = (v: unknown, suffix: string): number | undefined => {
     if (typeof v !== 'string') return undefined
