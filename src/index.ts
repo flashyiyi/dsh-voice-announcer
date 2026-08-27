@@ -377,6 +377,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   // 念完一句（ffplay close）再念下一句——不被后续句子互相掐断；
   // 只有 turn/start、user/message、结束通知播报才打断清队。
   let activeSessionId: string | undefined
+  let activeWarned = false
   let liveBuf = ''
   const liveQueue: string[] = []
   let livePlaying = false
@@ -516,7 +517,13 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
           // 只读当前活动会话：前端经 POST /voice-announcer/active 上报
           if (cfg.liveReadActiveOnly) {
             const sid = String(session?.id ?? '')
-            if (!sid || !activeSessionId || sid !== activeSessionId) return
+            if (!sid) return
+            // activeSessionId 未上报时宽松放行（避免上报缺失导致完全不念）；有值时精确限制
+            if (activeSessionId && sid !== activeSessionId) return
+            if (!activeSessionId && !activeWarned) {
+              activeWarned = true
+              log('仅当前活动会话开启，但尚未收到前端活动会话上报——暂不限制，收到上报后精确生效')
+            }
           }
           feedLive(chunk.text, log)
         }

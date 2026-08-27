@@ -13,7 +13,7 @@ type ClientContext = {
   settingsScope: SettingsScopeBinder
 }
 
-export const inject = ['slots', 'settingsScope']
+export const inject = ['slots', 'settingsScope', 'sessions']
 
 export const name = 'dsh-voice-announcer'
 
@@ -294,7 +294,7 @@ export function apply(ctx: ClientContext): void {
   // 常驻上报当前活动会话（不依赖设置页挂载）：host 的「仅当前活动会话」判定数据源。
   // 订阅 sessions 列表快照，current 变化即 POST /voice-announcer/active。
   try {
-    const list = (ctx as { sessions?: { list?: { getSnapshot(): { current?: string }; subscribe(fn: () => void): () => void } } }).sessions?.list
+    const list = ctx.sessions.list
     if (list && typeof list.getSnapshot === 'function' && typeof list.subscribe === 'function') {
       const report = (): void => {
         try {
