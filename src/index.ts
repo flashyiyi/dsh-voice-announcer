@@ -183,7 +183,17 @@ const LANG_TEXTS: Record<string, Record<string, string>> = {
   },
 }
 
-/** 用户界面语言偏好（settings locale.preference；zh/en，未设置时 undefined）。 */
+/**
+ * 用户界面语言偏好（settings locale.preference）。
+ *
+ * 说明：DSH 的界面语言（locale）本身只支持 zh / en 两种（官方
+ * LOCALE_IDS = ['zh','en']），因此「auto」跟随界面语言时只能映射到
+ * 中文（晓晓）或英文（Aria）两种音色。插件虽然支持 8 种播报语言
+ * （zh/en/ja/ko/fr/de/ru/es，见 LANG_TEXTS），但其余 6 种语言没有
+ * 对应的界面语言来源——要使用它们需在「音色」下拉中直接选择对应
+ * 语言的具体音色（如 ja-JP-NanamiNeural），播报文案会按音色前缀
+ * 自动切换。未来若 DSH 扩展界面语言支持，此处只需补充映射即可。
+ */
 function userLocale(ctx: AppContext): string | undefined {
   try {
     const s = typeof (ctx as any).get === 'function' ? (ctx as any).get('settings') : undefined
