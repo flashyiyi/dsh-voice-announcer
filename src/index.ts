@@ -273,7 +273,7 @@ function speakSapi(text: string, log: (m: string) => void): void {
 /** edge-tts 流式合成（内置协议，零依赖）→ ffplay 从 stdin 边收边播。
  * 每块音频到达立即写入 ffplay 的 stdin，合成完成即关闭输入（无临时文件、无转码）。
  * ffplay 不可用时降级 SAPI 播报。 */
-function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, instId?: string): () => void {
+function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, instId?: string, onDone?: () => void): () => void {
   log('实例 ' + (instId ?? '?') + ' 开始流式合成 voice=' + cfg.voice + ' rate=' + cfg.rate + ' pitch=' + cfg.pitch)
   let aborted = false
   const player = spawn('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet', '-i', '-'], {
@@ -308,6 +308,8 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, i
   })
   player.on('close', (code) => {
     log('播放结束 code=' + String(code) + (stderrBuf ? ' stderr=' + stderrBuf.trim().slice(0, 200) : ''))
+    // 正常播完（非被打断）才通知完成，驱动句子播放队列
+    if (!aborted) onDone?.()
   })
   return () => {
     aborted = true
@@ -360,14 +362,32 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   const instId = Math.random().toString(36).slice(2, 8)
   log('插件启动（实例 ' + instId + '），enabled=' + cfg.enabled + ' engine=' + cfg.engine);
   installVoiceSettings(ctx, cfg, config, log);
-  // 实时朗读状态（apply 闭包内，每实例独立）
+  // 实时朗读状态（apply 闭包内，每实例独立）。句子按序排队，
+  // 念完一句（ffplay close）再念下一句——不被后续句子互相掐断；
+  // 只有 turn/start、user/message、结束通知播报才打断清队。
   let activeSessionId: string | undefined
   let liveBuf = ''
+  const liveQueue: string[] = []
+  let livePlaying = false
   let liveStop: (() => void) | null = null
+  /** 队头句子播完后再播下一句；队列空则空闲。 */
+  function pumpLive(log2: (m: string) => void): void {
+    if (livePlaying || liveQueue.length === 0) return
+    livePlaying = true
+    const s = liveQueue.shift() as string
+    log2('实时朗读: ' + s.slice(0, 40))
+    liveStop = speakEdgeTts(s, cfg, log2, instId, () => {
+      livePlaying = false
+      liveStop = null
+      pumpLive(log2)
+    })
+  }
   function stopLiveRead(log2: (m: string) => void): void {
-    if (liveStop || liveBuf) log2('打断实时朗读（剩余缓冲 ' + liveBuf.length + ' 字）')
+    if (liveStop || liveQueue.length || liveBuf) log2('打断实时朗读（队列 ' + liveQueue.length + ' 句，剩余缓冲 ' + liveBuf.length + ' 字）')
     try { liveStop?.() } catch { /* 忽略 */ }
     liveStop = null
+    livePlaying = false
+    liveQueue.length = 0
     liveBuf = ''
   }
   function feedLive(text: string, log2: (m: string) => void): void {
@@ -390,11 +410,8 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       }
     }
     liveBuf = rest
-    for (const s of ready) {
-      log2('实时朗读句子: ' + s.slice(0, 40))
-      try { liveStop?.() } catch { /* 忽略 */ }
-      liveStop = speakEdgeTts(s, cfg, log2, instId)
-    }
+    for (const s of ready) liveQueue.push(s)
+    pumpLive(log2)
   }
 
   // 试听路由：POST /voice-announcer/preview {voice, text?} → 合成 mp3 返回（client 浏览器播放）
