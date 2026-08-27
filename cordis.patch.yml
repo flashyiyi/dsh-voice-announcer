@@ -1,0 +1,11 @@
+# dsh-voice-announcer 装配补丁：通过 `dsh plugin add` 安装时自动插入此配置。
+# 用户可在自己 profile 的 cordis.patch.yml 里覆盖这些配置（引擎/音色/开关等）。
+- insert:
+    - id: dsh-voice-announcer
+      config:
+        enabled: true
+        engine: edge-tts
+        voice: auto
+        announceCompleted: true
+        announceError: true
+        announceSubagent: false
