@@ -9,7 +9,7 @@ A voice announcement plugin for DSH (DeepSeek Harness). It listens for each sess
 - **Clear announcements** — `Session title: Round N ended`, with dedicated copy for errors, aborts, truncation, and interruptions
 - **8-language support** — announcement copy switches automatically based on the voice language (Chinese, English, Japanese, Korean, French, German, Russian, Spanish), falling back to Chinese
 - **Subagent control** — subagent sessions are silent by default; enable them with one toggle
-- **Live reading** — while a reply streams in, sentences are spoken as they complete (edge-tts, sentence-buffered); optionally restrict to the currently active session only
+- **Live reading** — while a reply streams in, sentences are spoken as they complete (edge-tts, sentence-buffered, pre-synthesized for gapless playback); optionally restrict to the currently active session only, with catch-up jumping when the reading falls behind
 - **Web settings UI** — configure everything in Settings → Plugin configuration; changes apply live, no config-file editing
 - **Voice preview** — a "Preview" button next to the voice picker synthesizes a sample using the current rate and pitch
 - **Two engines** — edge-tts (neural voices, requires network) or sapi (offline Windows voices)
@@ -49,8 +49,9 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
     announceCompleted: true
     announceError: true
     announceSubagent: false  # announce subagent sessions too
-    liveRead: false          # live-read replies as they stream in (edge-tts only)
+    liveRead: true           # live-read replies as they stream in (edge-tts only)
     liveReadActiveOnly: true # live-read only the currently active session
+    liveReadMaxQueue: 5      # catch-up jump threshold (pending sentences)
 ```
 
 ### Options
@@ -65,8 +66,9 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 | announceCompleted | true | Announce normal completion |
 | announceError | true | Announce errors, aborts, and truncations |
 | announceSubagent | false | Announce subagent sessions too |
-| liveRead | false | Live-read replies sentence by sentence while they stream (edge-tts only) |
+| liveRead | true | Live-read replies sentence by sentence while they stream (edge-tts only) |
 | liveReadActiveOnly | true | Live-read only the currently active session (the browser reports it) |
+| liveReadMaxQueue | 5 | Catch-up jump: when the pending queue exceeds this many sentences, drop the stale ones and jump to the latest content |
 
 ## Voices (edge-tts, 22)
 

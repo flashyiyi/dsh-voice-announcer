@@ -9,7 +9,7 @@ DSH（DeepSeek Harness）语音播报插件：监听每个会话的 `turn/end` �
 - **播报清晰**：`会话名：第 N 轮对话结束了`，出错、中止、截断、打断各有专属文案
 - **8 种语言**：按音色语言自动切换播报文案（中/英/日/韩/法/德/俄/西），未知语言回退中文
 - **子代理可控**：子代理（subagent）会话默认静默，一键开启即可一并播报
-- **实时朗读**：回复生成过程中按句朗读（edge-tts，句子缓冲、边出边念）；可只读当前活动会话
+- **实时朗读**：回复生成过程中按句朗读（edge-tts，句子缓冲、预合成无缝衔接）；可只读当前活动会话，追不上时自动跳到最新内容
 - **Web 设置界面**：在 设置 → 插件配置 中完成全部配置，保存后即时生效，无需改配置文件
 - **音色试听**：音色下拉旁提供「试听」按钮，按当前语速与音调合成示例语音
 - **双引擎**：edge-tts（神经网络音质，需联网）/ sapi（Windows 本地语音，离线可用）
@@ -49,8 +49,9 @@ dsh plugin --profile web add dsh-voice-announcer
     announceCompleted: true
     announceError: true
     announceSubagent: false  # 是否播报子代理会话
-    liveRead: false          # 实时朗读：回复生成时边出边念（仅 edge-tts）
+    liveRead: true           # 实时朗读：回复生成时边出边念（仅 edge-tts）
     liveReadActiveOnly: true # 只朗读当前活动会话
+    liveReadMaxQueue: 5      # 跟读跳跃阈值（待念队列句数）
 ```
 
 ### 配置项
@@ -65,8 +66,9 @@ dsh plugin --profile web add dsh-voice-announcer
 | announceCompleted | true | 对话正常结束时播报 |
 | announceError | true | 出错、中止、截断时播报 |
 | announceSubagent | false | 是否播报子代理会话 |
-| liveRead | false | 实时朗读：回复按句边出边念（仅 edge-tts） |
+| liveRead | true | 实时朗读：回复按句边出边念（仅 edge-tts） |
 | liveReadActiveOnly | true | 只朗读当前活动会话（浏览器自动上报） |
+| liveReadMaxQueue | 5 | 跟读跳跃：待念队列超过此句数时丢弃旧文本、跳到最新内容 |
 
 ## 音色（edge-tts，共 22 个）
 
