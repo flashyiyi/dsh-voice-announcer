@@ -608,8 +608,12 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
         }
         return
       }
-      // 新轮开始：清积压旧句但不掐正在播放的句子（输入信息不打断语音）
+      // 新轮开始：清积压旧句但不掐正在播放的句子（输入信息不打断语音）。
+      // 子会话（subagent）的 turn/start 会随工具调用触发，必须过滤——否则子代理
+      // 回合开始会清掉主会话的实时朗读队列/缓冲，造成「某些工具调用中断朗读」。
       if (type === 'turn/start') {
+        if (session?.header?.origin === 'subagent') return
+        if (cfg.liveReadActiveOnly && activeSessionId && String(session?.id ?? '') !== activeSessionId) return
         flushLive(log)
         return
       }
