@@ -55,11 +55,13 @@ interface FieldDef {
   max?: number
   step?: number
   suffix?: string
+  /** 附加在 hint 尾部的超链接（如音色完整列表）。 */
+  link?: string
 }
 const FIELDS: FieldDef[] = [
   { key: 'enabled', label: '启用播报', hint: '关闭后不再播报任何对话结束通知', type: 'bool' },
   { key: 'engine', label: '播报引擎', hint: 'edge-tts：神经网络音质，需联网与 ffplay（随 ffmpeg 安装）；sapi：Windows 本地语音，离线可用', type: 'select', options: ['edge-tts', 'sapi'] },
-  { key: 'voice', label: '音色', hint: '「自动」跟随界面语言；可下拉选常用音色，或直接输入任意 edge-tts 音色 id 并试听（完整列表：https://learn.microsoft.com/en-us/azure/ai-services/speech-service/language-support?tabs=tts）', type: 'voice', options: ['auto', ...VOICES] },
+  { key: 'voice', label: '音色', hint: '「自动」跟随界面语言；可下拉选常用音色，或选「自定义…」输入任意 edge-tts 音色 id 并试听', type: 'voice', options: ['auto', ...VOICES], link: 'https://learn.microsoft.com/en-us/azure/ai-services/speech-service/language-support?tabs=tts' },
   { key: 'rate', label: '语速', hint: '相对正常语速的偏移（-50% ~ +50%）', type: 'slider', min: -50, max: 50, step: 5, suffix: '%' },
   { key: 'pitch', label: '音调', hint: '相对正常音调的偏移（-50Hz ~ +50Hz）', type: 'slider', min: -50, max: 50, step: 5, suffix: 'Hz' },
   { key: 'announceCompleted', label: '完成时播报', hint: '对话正常结束时播报', type: 'bool' },
@@ -91,6 +93,7 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
   const [previewing, setPreviewing] = useState(false)
+  const [voiceCustom, setVoiceCustom] = useState(false)
   const previewRef = useRef<HTMLAudioElement | null>(null)
   const dirtyRef = useRef(false)
   dirtyRef.current = Object.keys(draft).length > 0
@@ -109,6 +112,11 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
   /** 字段是否被用户覆盖（user 层有值，或草稿里 set）。 */
   const overridden = (field: FieldDef): boolean =>
     draft[field.key] !== undefined || (user !== undefined && field.key in user)
+  /** 音色值是否在常用列表内（否则视为自定义输入）。 */
+  const isVoiceKnown = ((): boolean => {
+    const v = String(fieldValue(FIELDS[2]) ?? '')
+    return v === '' || v === 'auto' || VOICES.includes(v)
+  })()
   /** 当前引擎（草稿优先）。 */
   const engine = String(fieldValue(FIELDS[1]) ?? 'edge-tts')
   /** sapi 引擎：不支持 voice/rate/pitch（SAPI 用系统语音）；实时朗读仅 edge-tts。 */
@@ -262,24 +270,40 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
                         )
                       : field.type === 'voice'
                         ? (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <input list="dsh-voice-announcer-voices" placeholder="选择或输入音色 id…"
-                              value={String(cur ?? '')} disabled={fieldDisabled(field)}
-                              onChange={(e) => { const val = e.target.value; stage(field.key as string, val === '' ? null : val) }}
-                              style={inputBase} />
-                            <datalist id="dsh-voice-announcer-voices">
-                              {(field.options ?? []).map(o => <option key={o} value={o} />)}
-                            </datalist>
-                            <button type="button"
-                              disabled={String(fieldValue(field) ?? '') === 'auto' || !writable || previewing}
-                              onClick={() => {
-                                const voice = String(fieldValue(field) ?? '')
-                                if (!voice || voice === 'auto') return
-                                previewVoice(voice)
-                              }}
-                              style={{ appearance: 'none', border: '1px solid ' + v.border, borderRadius: 8, padding: '5px 12px', font: 'inherit', fontSize: 13, lineHeight: '1.5', cursor: 'pointer', background: 'none', color: v.label2, whiteSpace: 'nowrap' }}>
-                              {previewing ? '试听中…' : '试听'}
-                            </button>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <select
+                                value={isVoiceKnown ? String(cur ?? '') : '__custom__'}
+                                disabled={fieldDisabled(field)}
+                                onChange={(e) => {
+                                  const val = e.target.value
+                                  if (val === '__custom__') { setVoiceCustom(true); return }
+                                  setVoiceCustom(false)
+                                  stage(field.key as string, val === '' ? null : val)
+                                }}
+                                style={inputBase}>
+                                {(field.options ?? []).map(o => <option key={o} value={o}>{o}</option>)}
+                                <option value="__custom__">自定义…</option>
+                              </select>
+                              <button type="button"
+                                disabled={String(fieldValue(field) ?? '') === 'auto' || !writable || previewing}
+                                onClick={() => {
+                                  const voice = String(fieldValue(field) ?? '')
+                                  if (!voice || voice === 'auto') return
+                                  previewVoice(voice)
+                                }}
+                                style={{ appearance: 'none', border: '1px solid ' + v.border, borderRadius: 8, padding: '5px 12px', font: 'inherit', fontSize: 13, lineHeight: '1.5', cursor: 'pointer', background: 'none', color: v.label2, whiteSpace: 'nowrap' }}>
+                                {previewing ? '试听中…' : '试听'}
+                              </button>
+                            </div>
+                            {(!isVoiceKnown || voiceCustom)
+                              ? (
+                                <input placeholder="输入任意 edge-tts 音色 id，如 zh-CN-YunxiaNeural"
+                                  value={String(cur ?? '')} disabled={fieldDisabled(field)}
+                                  onChange={(e) => stage(field.key as string, e.target.value === '' ? null : e.target.value)}
+                                  style={inputBase} />
+                              )
+                              : null}
                           </div>
                         )
                       : field.type === 'slider'
@@ -304,7 +328,12 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
                             </select>
                           </div>
                         )}
-                    <p style={{ margin: 0, fontSize: 12, lineHeight: '1.5', color: v.label3 }}>{field.hint}</p>
+                    <p style={{ margin: 0, fontSize: 12, lineHeight: '1.5', color: v.label3 }}>
+                      {field.hint}
+                      {field.link
+                        ? <a href={field.link} target="_blank" rel="noreferrer" style={{ color: v.brand, textDecoration: 'underline', marginLeft: 4 }}>完整音色列表 ↗</a>
+                        : null}
+                    </p>
                   </div>
                 )
               })}
