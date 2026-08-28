@@ -1,6 +1,6 @@
 {
   "name": "dsh-voice-announcer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "对话结束语音播报：会话名+轮数+结果（edge-tts 流式 / SAPI）",
   "type": "module",
   "main": "./lib/index.js",
