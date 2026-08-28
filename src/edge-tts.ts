@@ -53,6 +53,12 @@ function releasePooled(socket: WsSocket): void {
 function dropPooled(socket: WsSocket): void {
   if (pooledConn && pooledConn.socket === socket) pooledConn = null
 }
+/** 关闭并清空连接池（插件卸载/热重载时调用，避免残留 socket）。 */
+export function closeConnectionPool(): void {
+  const p = pooledConn
+  pooledConn = null
+  if (p) { try { p.socket.close() } catch { /* 忽略 */ } }
+}
 
 /**
  * 本地生成 Sec-MS-GEC 令牌（对齐 edge-tts DRM 算法，5 分钟窗口）。
