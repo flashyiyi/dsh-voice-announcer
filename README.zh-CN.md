@@ -96,19 +96,6 @@ dsh plugin --profile web add dsh-voice-announcer
 - 每次播报边合成边流式播放，无临时文件、无转码；ffplay 缺失时自动降级 SAPI
 - 出错时附带错误信息（截取前 60 字）；中止时区分「你中止」与「父代理中止」
 
-## 外部朗读 API（供游戏/其他进程调用）
-
-独立于 DSH 会话播报的朗读通道，复用同一套流式管线（切句、预合成 2 句缓冲、积压跳跃、打断）：
-
-| 接口 | 说明 |
-| --- | --- |
-| `POST /voice-announcer/speak` | body `{text, voice?, rate?, pitch?}` → 整段文本切句入队，逐句**预合成 + 流式播放**（首句约 1s 出声）；**新请求打断旧朗读**与 DSH 实时朗读；立即返回 `{ok, sentences}`，不等待合成 |
-| `POST /voice-announcer/stop` | 打断当前外部朗读（掐播放、清队列） |
-
-- `voice` 为合法 edge-tts 音色 id（如 `zh-CN-XiaoxiaoNeural`）；**非法/缺失回退 `zh-CN-XiaoxiaoNeural`（晓晓）**
-- `rate`/`pitch` 缺省用插件配置（如 `+0%` / `+0Hz`）
-- 播放完成后无回调（供 UE 游戏内口型/动作时序的时长请自行按文本估算）
-
 ## 开发
 
 ```bash
