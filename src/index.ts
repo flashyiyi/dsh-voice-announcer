@@ -45,7 +45,7 @@ const DEFAULTS: ConfigType = {
   announceCompleted: true,
   announceError: true,
   announceSubagent: false,
-  liveRead: false,
+  liveRead: true,
   liveReadActiveOnly: true,
 }
 
