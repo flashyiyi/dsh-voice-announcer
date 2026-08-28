@@ -273,13 +273,22 @@ function speakSapi(text: string, log: (m: string) => void): void {
   child.on('error', (e) => log('SAPI spawn失败: ' + e.message))
 }
 
+/** 单次朗读的参数覆盖（外部朗读 API 按请求自定义音色/语速/音调）。 */
+interface SpeakOverrides {
+  voice?: string
+  rate?: string
+  pitch?: string
+}
+
 /** edge-tts 流式合成（内置协议，零依赖）→ ffplay 从 stdin 边收边播。
  * 每块音频到达立即写入 ffplay 的 stdin，合成完成即关闭输入（无临时文件、无转码）。
  * ffplay 不可用时降级 SAPI 播报。
  * 完成通知（onDone）：ffplay close 一律触发（播完/崩溃/合成失败/被打断），
  * finished 防重；句子播放队列靠它恢复，避免合成失败后 livePlaying 卡死。 */
-function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, instId?: string, onDone?: () => void): () => void {
-  log('实例 ' + (instId ?? '?') + ' 开始流式合成 voice=' + cfg.voice + ' rate=' + cfg.rate + ' pitch=' + cfg.pitch)
+function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, instId?: string, onDone?: () => void, over?: SpeakOverrides): () => void {
+  const voice = over?.voice || cfg.voice
+  const rate = over?.rate || cfg.rate
+  const pitch = over?.pitch || cfg.pitch
   let aborted = false
   let finished = false
   const finish = (): void => {
@@ -301,7 +310,7 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, i
   })
   player.stdin?.on('error', (e) => { log('播放输入流写入失败: ' + e.message) })
   synthesizeSpeechStream(
-    { text, voice: cfg.voice, rate: cfg.rate, pitch: cfg.pitch },
+    { text, voice, rate, pitch },
     (chunk) => {
       if (aborted) return
       try {
@@ -312,7 +321,6 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, i
     },
   ).then(() => {
     try { player.stdin?.end() } catch { /* 忽略 */ }
-    log('合成完成，播放输入已关闭')
   }).catch((e) => {
     aborted = true
     log('合成失败: ' + (e instanceof Error ? e.message : String(e)))
@@ -321,7 +329,7 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, i
     setTimeout(finish, 1000)
   })
   player.on('close', (code) => {
-    log('播放结束 code=' + String(code) + (stderrBuf ? ' stderr=' + stderrBuf.trim().slice(0, 200) : ''))
+    if (code !== 0 && stderrBuf) log('播放异常 code=' + String(code) + ' ' + stderrBuf.trim().slice(0, 120))
     // 任何结束原因都恢复队列（被打断时 stopLiveRead 已清队，pumpLive 无句可播，安全）
     finish()
   })
@@ -406,7 +414,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     player.stdin?.on('error', (e) => { log2('播放输入流写入失败: ' + e.message) })
     try { player.stdin?.write(buf); player.stdin?.end() } catch (e) { log2('写播放流失败: ' + (e instanceof Error ? e.message : String(e))) }
     player.on('close', (code) => {
-      log2('播放结束 code=' + String(code))
+      if (code !== 0) log2('播放异常 code=' + String(code))
       if (!aborted) finish()
     })
     return () => { aborted = true; try { player.kill() } catch { /* 忽略 */ } }
@@ -421,7 +429,6 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     if (pending <= 0) return
     const s = liveQueue[preReadyQueue.length]
     const epoch = liveEpoch
-    log2('预合成: ' + s.slice(0, 30))
     let p: Promise<void>
     p = synthesizeSpeech({ text: s, voice: cfg.voice, rate: cfg.rate, pitch: cfg.pitch }, 8000)
       .then((buf) => {
@@ -538,6 +545,116 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     ensurePreSynth(log2)
     pumpLive(log2)
   }
+  // ==================== 外部朗读 API（UE 游戏等外部进程调用） ====================
+  // 独立于 DSH 会话 liveRead 的朗读通道：整段文本切句入队，逐句预合成（2 句缓冲）+
+  // 流式播放（首句约 1s 出声）；新请求打断旧朗读。音色按请求传递，非法值回退晓晓。
+  const FALLBACK_VOICE = 'zh-CN-XiaoxiaoNeural'
+  function normalizeVoice(v: unknown): string {
+    const s = typeof v === 'string' ? v.trim() : ''
+    // 合法 edge-tts 音色 id 形如 zh-CN-XiaoxiaoNeural / en-US-AriaNeural
+    return /^[a-z]{2,4}(-[A-Z]{2,4}){1,2}[A-Za-z]+Neural$/i.test(s) ? s : FALLBACK_VOICE
+  }
+  /** 整段文本切句：强边界（句号/感叹/问号/分号/换行）切，长句按弱边界（逗号）切，去 markdown。 */
+  function extSplitSentences(text: string): string[] {
+    const out: string[] = []
+    const parts = String(text).split(/(?<=[。！？!?；;\n])/)
+    let rest = parts[parts.length - 1] ?? ''
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      const s = stripMd(parts[i])
+      if (s) out.push(s)
+    }
+    while (rest.length >= 40) {
+      const weak = rest.match(/.*[，、,]/)
+      if (!weak) break
+      const s = stripMd(weak[0])
+      if (s) out.push(s)
+      rest = rest.slice(weak[0].length)
+    }
+    const tail = stripMd(rest)
+    if (tail) out.push(tail)
+    return out
+  }
+  let extQueue: string[] = []
+  let extPlaying = false
+  let extStopFn: (() => void) | null = null
+  let extPreSynth: Promise<void> | null = null
+  const extPreReady: Buffer[] = []
+  let extPreFailed = false
+  let extPreSynthDisabled = false
+  let extPreFailCount = 0
+  let extEpoch = 0
+  let extVoice = cfg.voice
+  let extRate = cfg.rate
+  let extPitch = cfg.pitch
+  /** 外部朗读预合成流水线：队首下一句预合成进缓冲（最多 2 句），失败降级现场流式。 */
+  function extEnsurePreSynth(log2: (m: string) => void): void {
+    if (extPreSynth || extPreFailed || extPreSynthDisabled || extPreReady.length >= 2) return
+    const pending = extQueue.length - extPreReady.length
+    if (pending <= 0) return
+    const s = extQueue[extPreReady.length]
+    const epoch = extEpoch
+    log2('外部朗读预合成: ' + s.slice(0, 30))
+    let p: Promise<void>
+    p = synthesizeSpeech({ text: s, voice: extVoice, rate: extRate, pitch: extPitch }, 8000)
+      .then((buf) => {
+        if (extPreSynth === p) extPreSynth = null
+        if (epoch !== extEpoch) { extEnsurePreSynth(log2); return }
+        extPreFailCount = 0
+        extPreReady.push(buf)
+        extEnsurePreSynth(log2)
+      })
+      .catch((e) => {
+        if (extPreSynth === p) extPreSynth = null
+        if (epoch !== extEpoch) { extEnsurePreSynth(log2); return }
+        extPreFailed = true
+        extPreFailCount += 1
+        log2('外部朗读预合成失败(' + extPreFailCount + '): ' + (e instanceof Error ? e.message : String(e)))
+        if (extPreFailCount >= 2) {
+          extPreSynthDisabled = true
+          log2('网络不佳，外部朗读降级为现场流式')
+        }
+      })
+    extPreSynth = p
+  }
+  /** 外部朗读队列调度：优先预合成 Buffer 无缝续播，否则现场流式；播完自动下一句。 */
+  function extPump(log2: (m: string) => void): void {
+    if (extPlaying || extQueue.length === 0) return
+    if (extPreSynth) {
+      extPlaying = true
+      extPreSynth.then(() => { extPlaying = false; extPump(log2) }).catch(() => { extPlaying = false; extPump(log2) })
+      return
+    }
+    extPlaying = true
+    const s = extQueue.shift() as string
+    const next = (): void => { extPlaying = false; extStopFn = null; extEnsurePreSynth(log2); extPump(log2) }
+    if (extPreReady.length > 0) {
+      const buf = extPreReady.shift() as Buffer
+      log2('外部朗读(预合成): ' + s.slice(0, 40))
+      extStopFn = playBuffer(buf, log2, next)
+    } else if (extPreFailed) {
+      extPreFailed = false
+      log2('外部朗读(现场流式): ' + s.slice(0, 40))
+      extStopFn = speakEdgeTts(s, cfg, log2, instId, next, { voice: extVoice, rate: extRate, pitch: extPitch })
+    } else {
+      log2('外部朗读(现场流式): ' + s.slice(0, 40))
+      extStopFn = speakEdgeTts(s, cfg, log2, instId, next, { voice: extVoice, rate: extRate, pitch: extPitch })
+    }
+    extEnsurePreSynth(log2)
+  }
+  /** 打断外部朗读：掐当前播放、清队列与预合成（世代号防过期结果污染）。 */
+  function extStopAll(log2: (m: string) => void): void {
+    if (extStopFn || extQueue.length) log2('打断外部朗读（队列 ' + extQueue.length + ' 句）')
+    try { extStopFn?.() } catch { /* 忽略 */ }
+    extStopFn = null
+    extPlaying = false
+    extQueue.length = 0
+    extPreSynth = null
+    extPreReady.length = 0
+    extPreFailed = false
+    extPreSynthDisabled = false
+    extPreFailCount = 0
+    extEpoch += 1
+  }
   // 缓冲超时强制切句：模型输出停顿（>2s 无新 chunk）时，把未到边界的缓冲也念掉，
   // 避免工具执行/思考期间残留文本长时间不念（表现为「实时朗读没有了」）
   const flushTimer = setInterval(() => {
@@ -626,7 +743,71 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
         path: '/voice-announcer/active',
         handler: activeHandler,
       }), 'voice-announcer: active api')
-      log('试听路由已注册')
+      // 外部朗读 API：POST /voice-announcer/speak {text, voice?, rate?, pitch?}
+      // → 整段文本切句入外部朗读队列，逐句预合成+流式播放（边合成边播，首句约 1s 出声）；
+      // 新请求打断旧朗读与 DSH 实时朗读（避免两路语音同响）；立即返回，不等待合成。
+      const speakHandler = async (req: any, res: any): Promise<void> => {
+        try {
+          let raw = ''
+          for await (const chunk of req) raw += String(chunk)
+          let text = '', voice: string | undefined, rate: string | undefined, pitch: string | undefined
+          try {
+            const body = JSON.parse(raw || '{}')
+            text = String(body.text ?? '')
+            if (typeof body.voice === 'string') voice = body.voice
+            if (typeof body.rate === 'string') rate = body.rate
+            if (typeof body.pitch === 'string') pitch = body.pitch
+          } catch { /* 保持默认 */ }
+          if (!text.trim()) {
+            res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
+            res.end('text 缺失')
+            return
+          }
+          extVoice = normalizeVoice(voice)
+          extRate = rate || cfg.rate
+          extPitch = pitch || cfg.pitch
+          const sentences = extSplitSentences(text)
+          if (sentences.length === 0) {
+            res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
+            res.end('无可朗读文本')
+            return
+          }
+          // 新语音打断旧语音：清外部队列 + 掐 DSH 实时朗读（游戏语音优先）
+          extStopAll(log)
+          stopLiveRead(log)
+          extQueue = sentences
+          log('外部朗读请求: ' + sentences.length + ' 句 voice=' + extVoice + ' 首句=' + sentences[0].slice(0, 30))
+          extEnsurePreSynth(log)
+          extPump(log)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, sentences: sentences.length }))
+        } catch (e) {
+          res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end('失败: ' + (e instanceof Error ? e.message : String(e)))
+        }
+      }
+      (ctx as any).effect(() => ws.register({
+        kind: 'prefix',
+        path: '/voice-announcer/speak',
+        handler: speakHandler,
+      }), 'voice-announcer: speak api')
+      // 打断外部朗读：POST /voice-announcer/stop
+      const stopHandler = async (req: any, res: any): Promise<void> => {
+        try {
+          extStopAll(log)
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end('{"ok":true}')
+        } catch (e) {
+          res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end('失败: ' + (e instanceof Error ? e.message : String(e)))
+        }
+      }
+      (ctx as any).effect(() => ws.register({
+        kind: 'prefix',
+        path: '/voice-announcer/stop',
+        handler: stopHandler,
+      }), 'voice-announcer: stop api')
+      log('试听/外部朗读路由已注册')
     } else {
       log('webServer 不可用，试听路由跳过')
     }
