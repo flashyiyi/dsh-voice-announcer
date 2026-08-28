@@ -312,21 +312,27 @@ export function apply(ctx: ClientContext): void {
   try {
     const list = ctx.sessions.list
     if (list && typeof list.getSnapshot === 'function' && typeof list.subscribe === 'function') {
-      // 防抖 300ms：list 快照在流式输出时高频变化，合并为最后一次上报（避免刷屏/高频请求）
+      // 只在当前会话（current）真正变化时上报——流式输出时 list 快照会高频变化
+      // 但 current 不变，无需上报；300ms 合并连续切换。低频、不刷屏。
       let reportTimer: ReturnType<typeof setTimeout> | null = null
+      let prevCurrent: string | null | undefined
+      const sendReport = (): void => {
+        reportTimer = null
+        try {
+          const current = list.getSnapshot().current
+          void fetch('/voice-announcer/active', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: typeof current === 'string' && current ? current : null }),
+          }).catch(() => {})
+        } catch { /* 上报失败静默 */ }
+      }
       const report = (): void => {
-        if (reportTimer) return
-        reportTimer = setTimeout(() => {
-          reportTimer = null
-          try {
-            const current = list.getSnapshot().current
-            void fetch('/voice-announcer/active', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ sessionId: typeof current === 'string' && current ? current : null }),
-            }).catch(() => {})
-          } catch { /* 上报失败静默 */ }
-        }, 300)
+        const current = list.getSnapshot().current
+        if (current === prevCurrent) return
+        prevCurrent = current
+        if (reportTimer) clearTimeout(reportTimer)
+        reportTimer = setTimeout(sendReport, 300)
       }
       report()
       const unsubscribe = list.subscribe(report)

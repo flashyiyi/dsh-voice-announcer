@@ -592,7 +592,8 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
             sessionId = typeof v === 'string' && v ? v : undefined
           } catch {}
           activeSessionId = sessionId
-          log('当前活动会话更新: ' + (activeSessionId ?? '(无)'))
+          // 仅「仅当前活动会话」开启时需要上报（用于 chunk 比对）；关闭时静默存值
+          if (cfg.liveReadActiveOnly) log('当前活动会话更新: ' + (activeSessionId ?? '(无)'))
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end('{"ok":true}')
         } catch (e) {
