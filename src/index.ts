@@ -32,6 +32,8 @@ export interface Config {
   liveRead?: boolean
   /** 实时朗读只读当前活动会话（前端上报活动会话 id）；默认开启 */
   liveReadActiveOnly?: boolean
+  /** 跟读跳跃阈值：待念队列超过此句数时丢弃旧文本跳到最新；默认 3 */
+  liveReadMaxQueue?: number
 }
 
 export type ConfigType = Required<Config>
@@ -47,6 +49,7 @@ const DEFAULTS: ConfigType = {
   announceSubagent: false,
   liveRead: true,
   liveReadActiveOnly: true,
+  liveReadMaxQueue: 3,
 }
 
 const COMPLETED_KINDS = new Set(['completed', 'error', 'max-tokens', 'aborted', 'interrupted'])
@@ -343,6 +346,7 @@ const VoiceAnnouncerSettings = z.object({
   announceSubagent: z.boolean().default(DEFAULTS.announceSubagent),
   liveRead: z.boolean().default(DEFAULTS.liveRead),
   liveReadActiveOnly: z.boolean().default(DEFAULTS.liveReadActiveOnly),
+  liveReadMaxQueue: z.number().int().min(1).max(20).default(DEFAULTS.liveReadMaxQueue),
 })
 
 /** 接入 settings：有服务则 Web 设置页可改（live 生效），无服务则 entry 配置照常。 */
@@ -484,12 +488,10 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     preSynthDisabled = false
     preSynthFailCount = 0
   }
-  /** 实时朗读队列最多积压的待念句数（超过即跳跃丢弃旧句）。 */
-  const LIVE_MAX_QUEUE = 3
-  /** 跟读跳跃：队列积压超过 LIVE_MAX_QUEUE 时丢弃最旧句子，只留最新内容；
+  /** 跟读跳跃：队列积压超过 cfg.liveReadMaxQueue 时丢弃最旧句子，只留最新内容；
    * 不打断正在播放的句子（念完自然切到最新），预合成作废并重新预合成最新句。 */
   function jumpToLatest(log2: (m: string) => void): void {
-    const overflow = liveQueue.length - LIVE_MAX_QUEUE
+    const overflow = liveQueue.length - cfg.liveReadMaxQueue
     if (overflow <= 0) return
     liveQueue.splice(0, overflow)
     preReadyQueue.length = 0

@@ -30,6 +30,7 @@ interface VoiceAnnouncerSettings {
   announceSubagent?: boolean
   liveRead?: boolean
   liveReadActiveOnly?: boolean
+  liveReadMaxQueue?: number
 }
 
 /** edge-tts 常用音色（与「自动」并列，可试听）。 */
@@ -43,7 +44,7 @@ const VOICES = [
   'ko-KR-SunHiNeural', 'fr-FR-DeniseNeural', 'de-DE-KatjaNeural', 'ru-RU-SvetlanaNeural', 'es-ES-ElviraNeural',
 ]
 
-type FieldType = 'bool' | 'select' | 'slider'
+type FieldType = 'bool' | 'select' | 'slider' | 'number'
 interface FieldDef {
   key: keyof VoiceAnnouncerSettings
   label: string
@@ -66,6 +67,7 @@ const FIELDS: FieldDef[] = [
   { key: 'announceSubagent', label: '子任务也播报', hint: '子代理（subagent）会话默认不播报，开启后一并播报', type: 'bool' },
   { key: 'liveRead', label: '实时朗读', hint: '生成回复时边出边念（仅 edge-tts，逐句合成流式播放，无需等待完整回复）', type: 'bool' },
   { key: 'liveReadActiveOnly', label: '仅当前活动会话', hint: '只朗读当前正在查看的会话；关闭则所有会话的回复都实时朗读', type: 'bool' },
+  { key: 'liveReadMaxQueue', label: '跳跃阈值', hint: '待念队列超过此句数时丢弃旧文本、跳到最新内容（实时朗读追不上时）', type: 'number', min: 1, max: 10, step: 1, suffix: '句' },
 ]
 
 /** CSS 变量别名（与官方 dsw-alias 一致）。 */
@@ -115,7 +117,7 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
   const fieldDisabled = (field: FieldDef): boolean => {
     if (!writable) return true
     if (engineIsSapi && (field.key === 'voice' || field.key === 'rate' || field.key === 'pitch' || field.key === 'liveRead' || field.key === 'liveReadActiveOnly')) return true
-    if (field.key === 'liveReadActiveOnly' && liveReadOn !== true) return true
+    if ((field.key === 'liveReadActiveOnly' || field.key === 'liveReadMaxQueue') && liveReadOn !== true) return true
     return false
   }
 
@@ -242,6 +244,22 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
                           onChange={(e) => stage(field.key as string, e.target.checked)}
                           style={{ width: 16, height: 16, accentColor: v.brand }} />
                       )
+                      : field.type === 'number'
+                        ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <input type="number" min={field.min ?? 1} max={field.max ?? 10} step={field.step ?? 1}
+                              disabled={fieldDisabled(field)}
+                              value={String(cur ?? '')}
+                              onChange={(e) => {
+                                const v = Number(e.target.value)
+                                if (Number.isFinite(v) && v >= (field.min ?? 1)) stage(field.key as string, v)
+                              }}
+                              style={{ ...inputBase, width: 96 }} />
+                            {field.suffix
+                              ? <span style={{ fontSize: 12, lineHeight: '1.5', color: v.label3 }}>{field.suffix}</span>
+                              : null}
+                          </div>
+                        )
                       : field.type === 'slider'
                         ? (
                           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
