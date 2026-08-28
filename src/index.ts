@@ -346,7 +346,7 @@ const VoiceAnnouncerSettings = z.object({
   announceSubagent: z.boolean().default(DEFAULTS.announceSubagent),
   liveRead: z.boolean().default(DEFAULTS.liveRead),
   liveReadActiveOnly: z.boolean().default(DEFAULTS.liveReadActiveOnly),
-  liveReadMaxQueue: z.number().int().min(1).max(20).default(DEFAULTS.liveReadMaxQueue),
+  liveReadMaxQueue: z.number().min(1).max(20).default(DEFAULTS.liveReadMaxQueue),
 })
 
 /** 接入 settings：有服务则 Web 设置页可改（live 生效），无服务则 entry 配置照常。 */
