@@ -5,7 +5,7 @@
  * 额外提供流式 API —— 每个音频块到达即回调（onChunk），播放端可边收边播。
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { createWebSocket } from './websocket.js'
+import { createWebSocket, type WsSocket } from './websocket.js'
 
 const TRUSTED_CLIENT_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4'
 const WS_BASE = 'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1'
@@ -26,6 +26,33 @@ const WSS_HEADERS: Record<string, string> = {
 
 /** 合成相关错误（便于上层区分）。 */
 export class SynthesizeError extends Error {}
+
+/**
+ * 连接池：edge-tts 服务接受同一 WebSocket 连接多次合成（实测确认），
+ * 串行合成复用最近一条连接，避免每句一次 TLS 握手；并发时只有一方
+ * 拿到池连接，另一方新建。30s 未用自动作废。
+ */
+interface PooledConnection { socket: WsSocket; lastUsed: number }
+let pooledConn: PooledConnection | null = null
+const POOL_TTL_MS = 30000
+function takePooled(): WsSocket | null {
+  const p = pooledConn
+  pooledConn = null
+  if (!p) return null
+  if (Date.now() - p.lastUsed > POOL_TTL_MS) {
+    try { p.socket.close() } catch { /* 忽略 */ }
+    return null
+  }
+  return p.socket
+}
+function releasePooled(socket: WsSocket): void {
+  const old = pooledConn
+  pooledConn = { socket, lastUsed: Date.now() }
+  if (old && old.socket !== socket) { try { old.socket.close() } catch { /* 忽略 */ } }
+}
+function dropPooled(socket: WsSocket): void {
+  if (pooledConn && pooledConn.socket === socket) pooledConn = null
+}
 
 /**
  * 本地生成 Sec-MS-GEC 令牌（对齐 edge-tts DRM 算法，5 分钟窗口）。
@@ -87,18 +114,21 @@ export async function synthesizeSpeechStream(
     + '&ConnectionId=' + randomUUID().replace(/-/g, '')
     + '&Sec-MS-GEC=' + token
     + '&Sec-MS-GEC-Version=' + SEC_MS_GEC_VERSION
-  const socket = createWebSocket(new URL(url), { ...WSS_HEADERS, MUID: randomBytes(16).toString('hex').toUpperCase() })
+  // 复用池中连接（同连接多次合成，免握手）；拿不到则新建
+  const pooled = takePooled()
+  const socket = pooled ?? createWebSocket(new URL(url), { ...WSS_HEADERS, MUID: randomBytes(16).toString('hex').toUpperCase() })
   let done = false
   let receivedAudio = false
   let chainError: Error | undefined
   await new Promise<void>((resolvePromise, reject) => {
     const timer = setTimeout(() => {
       try { socket.close() } catch { /* 忽略 */ }
+      dropPooled(socket)
       reject(new SynthesizeError('语音合成超时（' + timeoutMs + ' 毫秒无完整音频），请重试或检查网络。'))
     }, timeoutMs)
-    const finish = (): void => { clearTimeout(timer); resolvePromise() }
-    const fail = (err: Error): void => { clearTimeout(timer); reject(err) }
-    socket.addEventListener('open', () => {
+    const finish = (): void => { clearTimeout(timer); releasePooled(socket); resolvePromise() }
+    const fail = (err: Error): void => { clearTimeout(timer); dropPooled(socket); try { socket.close() } catch { /* 忽略 */ }; reject(err) }
+    const sendRequest = (): void => {
       const config = protocolHeader('speech.config', { 'Content-Type': 'application/json; charset=utf-8' })
         + JSON.stringify({
           context: {
@@ -114,7 +144,13 @@ export async function synthesizeSpeechStream(
       } catch (error) {
         fail(error instanceof Error ? error : new Error(String(error)))
       }
-    })
+    }
+    if (pooled) {
+      // 复用连接：已 open，立即发送请求（open 事件不会再触发）
+      sendRequest()
+    } else {
+      socket.addEventListener('open', sendRequest)
+    }
     socket.addEventListener('message', (event) => {
       const data = event.data
       if (typeof data === 'string') {
@@ -139,9 +175,11 @@ export async function synthesizeSpeechStream(
       }
     })
     socket.addEventListener('error', () => {
+      dropPooled(socket)
       fail(new SynthesizeError('edge-tts WebSocket 连接失败。若网络需要代理（梯子），请直连重试或切换引擎为 sapi。'))
     })
     socket.addEventListener('close', () => {
+      dropPooled(socket)
       if (done) return
       if (chainError) { fail(chainError); return }
       if (receivedAudio) {
