@@ -87,6 +87,8 @@ dsh plugin --profile web add dsh-voice-announcer
 | 西语 | Elvira（es-ES） |
 
 > 非 CJK 音色要求合成文本与音色语言一致（服务端限制），各语言试听文本已内置。
+>
+> 音色选择支持**输入任意合法 edge-tts 音色 id**（内置常用音色下拉建议与试听按钮）。完整音色列表：[微软语音语言支持文档](https://learn.microsoft.com/zh-cn/azure/ai-services/speech-service/language-support?tabs=tts)。
 
 ## 行为
 

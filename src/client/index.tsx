@@ -44,7 +44,7 @@ const VOICES = [
   'ko-KR-SunHiNeural', 'fr-FR-DeniseNeural', 'de-DE-KatjaNeural', 'ru-RU-SvetlanaNeural', 'es-ES-ElviraNeural',
 ]
 
-type FieldType = 'bool' | 'select' | 'slider' | 'number'
+type FieldType = 'bool' | 'select' | 'slider' | 'number' | 'voice'
 interface FieldDef {
   key: keyof VoiceAnnouncerSettings
   label: string
@@ -59,7 +59,7 @@ interface FieldDef {
 const FIELDS: FieldDef[] = [
   { key: 'enabled', label: '启用播报', hint: '关闭后不再播报任何对话结束通知', type: 'bool' },
   { key: 'engine', label: '播报引擎', hint: 'edge-tts：神经网络音质，需联网与 ffplay（随 ffmpeg 安装）；sapi：Windows 本地语音，离线可用', type: 'select', options: ['edge-tts', 'sapi'] },
-  { key: 'voice', label: '音色', hint: '「自动」跟随界面语言；其余为 edge-tts 音色，可试听', type: 'select', options: ['auto', ...VOICES] },
+  { key: 'voice', label: '音色', hint: '「自动」跟随界面语言；可下拉选常用音色，或直接输入任意 edge-tts 音色 id 并试听（完整列表：https://learn.microsoft.com/en-us/azure/ai-services/speech-service/language-support?tabs=tts）', type: 'voice', options: ['auto', ...VOICES] },
   { key: 'rate', label: '语速', hint: '相对正常语速的偏移（-50% ~ +50%）', type: 'slider', min: -50, max: 50, step: 5, suffix: '%' },
   { key: 'pitch', label: '音调', hint: '相对正常音调的偏移（-50Hz ~ +50Hz）', type: 'slider', min: -50, max: 50, step: 5, suffix: 'Hz' },
   { key: 'announceCompleted', label: '完成时播报', hint: '对话正常结束时播报', type: 'bool' },
@@ -260,6 +260,28 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
                               : null}
                           </div>
                         )
+                      : field.type === 'voice'
+                        ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <input list="dsh-voice-announcer-voices" placeholder="选择或输入音色 id…"
+                              value={String(cur ?? '')} disabled={fieldDisabled(field)}
+                              onChange={(e) => { const val = e.target.value; stage(field.key as string, val === '' ? null : val) }}
+                              style={inputBase} />
+                            <datalist id="dsh-voice-announcer-voices">
+                              {(field.options ?? []).map(o => <option key={o} value={o} />)}
+                            </datalist>
+                            <button type="button"
+                              disabled={String(fieldValue(field) ?? '') === 'auto' || !writable || previewing}
+                              onClick={() => {
+                                const voice = String(fieldValue(field) ?? '')
+                                if (!voice || voice === 'auto') return
+                                previewVoice(voice)
+                              }}
+                              style={{ appearance: 'none', border: '1px solid ' + v.border, borderRadius: 8, padding: '5px 12px', font: 'inherit', fontSize: 13, lineHeight: '1.5', cursor: 'pointer', background: 'none', color: v.label2, whiteSpace: 'nowrap' }}>
+                              {previewing ? '试听中…' : '试听'}
+                            </button>
+                          </div>
+                        )
                       : field.type === 'slider'
                         ? (
                           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -280,20 +302,6 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
                               style={inputBase}>
                               {(field.options ?? []).map(o => <option key={o} value={o}>{o}</option>)}
                             </select>
-                            {field.key === 'voice'
-                              ? (
-                                <button type="button"
-                                  disabled={String(fieldValue(field) ?? '') === 'auto' || !writable || previewing}
-                                  onClick={() => {
-                                    const voice = String(fieldValue(field) ?? '')
-                                    if (!voice || voice === 'auto') return
-                                    previewVoice(voice)
-                                  }}
-                                  style={{ appearance: 'none', border: '1px solid ' + v.border, borderRadius: 8, padding: '5px 12px', font: 'inherit', fontSize: 13, lineHeight: '1.5', cursor: 'pointer', background: 'none', color: v.label2, whiteSpace: 'nowrap' }}>
-                                  {previewing ? '试听中…' : '试听'}
-                                </button>
-                              )
-                              : null}
                           </div>
                         )}
                     <p style={{ margin: 0, fontSize: 12, lineHeight: '1.5', color: v.label3 }}>{field.hint}</p>

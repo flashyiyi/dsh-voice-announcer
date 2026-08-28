@@ -87,6 +87,8 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 | Spanish | Elvira (es-ES) |
 
 > Non-CJK voices require the text to be in the matching language (server-side requirement); per-language preview texts are built in.
+>
+> The voice picker also accepts **any valid edge-tts voice id** by typing it (with a built-in list of common voices and a preview button). Full list: [Microsoft speech language support](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/language-support?tabs=tts).
 
 ## Behavior
 
