@@ -312,15 +312,21 @@ export function apply(ctx: ClientContext): void {
   try {
     const list = ctx.sessions.list
     if (list && typeof list.getSnapshot === 'function' && typeof list.subscribe === 'function') {
+      // 防抖 300ms：list 快照在流式输出时高频变化，合并为最后一次上报（避免刷屏/高频请求）
+      let reportTimer: ReturnType<typeof setTimeout> | null = null
       const report = (): void => {
-        try {
-          const current = list.getSnapshot().current
-          void fetch('/voice-announcer/active', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: typeof current === 'string' && current ? current : null }),
-          }).catch(() => {})
-        } catch { /* 上报失败静默 */ }
+        if (reportTimer) return
+        reportTimer = setTimeout(() => {
+          reportTimer = null
+          try {
+            const current = list.getSnapshot().current
+            void fetch('/voice-announcer/active', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sessionId: typeof current === 'string' && current ? current : null }),
+            }).catch(() => {})
+          } catch { /* 上报失败静默 */ }
+        }, 300)
       }
       report()
       const unsubscribe = list.subscribe(report)
