@@ -88,6 +88,9 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
   const [draft, setDraft] = useState<Record<string, unknown | null>>({})
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
+  const [previewing, setPreviewing] = useState(false)
+  const previewRef = useRef<HTMLAudioElement | null>(null)
+  const previewCache = useRef<Map<string, string>>(new Map())
   const dirtyRef = useRef(false)
   dirtyRef.current = Object.keys(draft).length > 0
 
@@ -156,6 +159,52 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
     if (!dirtyRef.current && !failed) return
     setDraft({})
     setFailed(false)
+  }
+
+  /** 试听：防连点重叠（停旧播放 + previewing 锁），同 voice/rate/pitch 结果缓存（重复试听秒回），10s 超时保护。 */
+  const previewVoice = (voice: string): void => {
+    const prev = previewRef.current
+    if (prev) { try { prev.pause() } catch { /* 忽略 */ } previewRef.current = null }
+    const rate = String(fieldValue(FIELDS[3]) ?? '+0%')
+    const pitch = String(fieldValue(FIELDS[4]) ?? '+0Hz')
+    const key = voice + '|' + rate + '|' + pitch
+    const cached = previewCache.current.get(key)
+    if (cached) {
+      const a = new Audio(cached)
+      previewRef.current = a
+      a.onended = () => { if (previewRef.current === a) { previewRef.current = null; setPreviewing(false) } }
+      void a.play().catch(() => { if (previewRef.current === a) { previewRef.current = null; setPreviewing(false) } })
+      return
+    }
+    setPreviewing(true)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 10000)
+    void (async () => {
+      try {
+        const resp = await fetch('/voice-announcer/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ voice, rate, pitch }),
+          signal: controller.signal,
+        })
+        clearTimeout(timer)
+        if (!resp.ok) { setPreviewing(false); return }
+        const blob = await resp.blob()
+        const url = URL.createObjectURL(blob)
+        previewCache.current.set(key, url)
+        if (previewCache.current.size > 8) {
+          const first = previewCache.current.entries().next().value as [string, string] | undefined
+          if (first) { try { URL.revokeObjectURL(first[1]) } catch { /* 忽略 */ } previewCache.current.delete(first[0]) }
+        }
+        const a = new Audio(url)
+        previewRef.current = a
+        a.onended = () => { if (previewRef.current === a) { previewRef.current = null; setPreviewing(false) } }
+        void a.play().catch(() => { if (previewRef.current === a) { previewRef.current = null; setPreviewing(false) } })
+      } catch {
+        clearTimeout(timer)
+        setPreviewing(false)
+      }
+    })()
   }
 
   const inputBase: React.CSSProperties = {
@@ -231,32 +280,14 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
                             {field.key === 'voice'
                               ? (
                                 <button type="button"
-                                  disabled={String(fieldValue(field) ?? '') === 'auto' || !writable}
+                                  disabled={String(fieldValue(field) ?? '') === 'auto' || !writable || previewing}
                                   onClick={() => {
                                     const voice = String(fieldValue(field) ?? '')
                                     if (!voice || voice === 'auto') return
-                                    void (async () => {
-                                      try {
-                                        const resp = await fetch('/voice-announcer/preview', {
-                                          method: 'POST',
-                                          headers: { 'Content-Type': 'application/json' },
-                                          body: JSON.stringify({
-                                            voice,
-                                            rate: String(fieldValue(FIELDS[3]) ?? '+0%'),
-                                            pitch: String(fieldValue(FIELDS[4]) ?? '+0Hz'),
-                                          }),
-                                        })
-                                        if (!resp.ok) return
-                                        const blob = await resp.blob()
-                                        const url = URL.createObjectURL(blob)
-                                        const audio = new Audio(url)
-                                        audio.onended = () => URL.revokeObjectURL(url)
-                                        void audio.play()
-                                      } catch { /* 试听失败静默 */ }
-                                    })()
+                                    previewVoice(voice)
                                   }}
                                   style={{ appearance: 'none', border: '1px solid ' + v.border, borderRadius: 8, padding: '5px 12px', font: 'inherit', fontSize: 13, lineHeight: '1.5', cursor: 'pointer', background: 'none', color: v.label2, whiteSpace: 'nowrap' }}>
-                                  试听
+                                  {previewing ? '试听中…' : '试听'}
                                 </button>
                               )
                               : null}
