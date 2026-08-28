@@ -382,6 +382,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   const liveQueue: string[] = []
   let livePlaying = false
   let liveStop: (() => void) | null = null
+  let summaryPlaying = false
   // 预合成流水线：当前句播放时后台合成队首下一句（Buffer 缓存），播完无缝衔接
   let preSynth: Promise<void> | null = null
   let preReady: Buffer | null = null
@@ -423,9 +424,10 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       })
   }
 
-  /** 队列调度：优先用预合成 Buffer 无缝续播；播放启动后立即预合成下一句。 */
+  /** 队列调度：优先用预合成 Buffer 无缝续播；播放启动后立即预合成下一句。
+   * 总结播报（summaryPlaying）期间不播，等总结念完自动续上。 */
   function pumpLive(log2: (m: string) => void): void {
-    if (livePlaying || liveQueue.length === 0) return
+    if (summaryPlaying || livePlaying || liveQueue.length === 0) return
     // 预合成进行中：等待完成再播（避免重复合成同一句）
     if (preSynth) {
       livePlaying = true
@@ -625,8 +627,15 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       const text = summarize(session, event, ctx, cfg.voice);
       stopLiveRead(log)
       log('播报 turn=' + String(event?.data?.turn ?? '?') + ' 引擎=' + cfg.engine + ' 文本=' + text.slice(0, 40));
-      if (cfg.engine === 'sapi') speakSapi(text, log)
-      else speakEdgeTts(text, cfg, log, instId)
+      if (cfg.engine === 'sapi') {
+        speakSapi(text, log)
+      } else {
+        summaryPlaying = true
+        speakEdgeTts(text, cfg, log, instId, () => {
+          summaryPlaying = false
+          pumpLive(log)
+        })
+      }
     } catch (e) {
       log('监听器异常: ' + (e instanceof Error ? e.message : String(e)))
     }
