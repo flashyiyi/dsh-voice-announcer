@@ -11,4 +11,4 @@
         announceSubagent: false
         liveRead: true
         liveReadActiveOnly: true
-        liveReadMaxQueue: 3
+        liveReadMaxQueue: 5

@@ -49,7 +49,7 @@ const DEFAULTS: ConfigType = {
   announceSubagent: false,
   liveRead: true,
   liveReadActiveOnly: true,
-  liveReadMaxQueue: 3,
+  liveReadMaxQueue: 5,
 }
 
 const COMPLETED_KINDS = new Set(['completed', 'error', 'max-tokens', 'aborted', 'interrupted'])
