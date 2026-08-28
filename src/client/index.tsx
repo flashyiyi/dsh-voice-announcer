@@ -90,7 +90,6 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
   const [failed, setFailed] = useState(false)
   const [previewing, setPreviewing] = useState(false)
   const previewRef = useRef<HTMLAudioElement | null>(null)
-  const previewCache = useRef<Map<string, string>>(new Map())
   const dirtyRef = useRef(false)
   dirtyRef.current = Object.keys(draft).length > 0
 
@@ -161,21 +160,12 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
     setFailed(false)
   }
 
-  /** 试听：防连点重叠（停旧播放 + previewing 锁），同 voice/rate/pitch 结果缓存（重复试听秒回），10s 超时保护。 */
+  /** 试听：防连点重叠（停旧播放 + previewing 锁），10s 超时保护。 */
   const previewVoice = (voice: string): void => {
     const prev = previewRef.current
     if (prev) { try { prev.pause() } catch { /* 忽略 */ } previewRef.current = null }
     const rate = String(fieldValue(FIELDS[3]) ?? '+0%')
     const pitch = String(fieldValue(FIELDS[4]) ?? '+0Hz')
-    const key = voice + '|' + rate + '|' + pitch
-    const cached = previewCache.current.get(key)
-    if (cached) {
-      const a = new Audio(cached)
-      previewRef.current = a
-      a.onended = () => { if (previewRef.current === a) { previewRef.current = null; setPreviewing(false) } }
-      void a.play().catch(() => { if (previewRef.current === a) { previewRef.current = null; setPreviewing(false) } })
-      return
-    }
     setPreviewing(true)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 10000)
@@ -191,11 +181,6 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
         if (!resp.ok) { setPreviewing(false); return }
         const blob = await resp.blob()
         const url = URL.createObjectURL(blob)
-        previewCache.current.set(key, url)
-        if (previewCache.current.size > 8) {
-          const first = previewCache.current.entries().next().value as [string, string] | undefined
-          if (first) { try { URL.revokeObjectURL(first[1]) } catch { /* 忽略 */ } previewCache.current.delete(first[0]) }
-        }
         const a = new Audio(url)
         previewRef.current = a
         a.onended = () => { if (previewRef.current === a) { previewRef.current = null; setPreviewing(false) } }
