@@ -382,17 +382,76 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   const liveQueue: string[] = []
   let livePlaying = false
   let liveStop: (() => void) | null = null
-  /** 队头句子播完后再播下一句；队列空则空闲。 */
+  // 预合成流水线：当前句播放时后台合成队首下一句（Buffer 缓存），播完无缝衔接
+  let preSynth: Promise<void> | null = null
+  let preReady: Buffer | null = null
+  let preFailed = false
+  let liveEpoch = 0
+  /** 播放已合成的 Buffer（ffplay stdin），播完触发 onDone 驱动流水线。 */
+  function playBuffer(buf: Buffer, log2: (m: string) => void, onDone: () => void): () => void {
+    let aborted = false
+    let finished = false
+    const finish = (): void => { if (!finished) { finished = true; onDone() } }
+    const player = spawn('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet', '-i', '-'], { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true })
+    player.on('error', (e) => { aborted = true; log2('ffplay 启动失败: ' + e.message); finish() })
+    player.stdin?.on('error', (e) => { log2('播放输入流写入失败: ' + e.message) })
+    try { player.stdin?.write(buf); player.stdin?.end() } catch (e) { log2('写播放流失败: ' + (e instanceof Error ? e.message : String(e))) }
+    player.on('close', (code) => {
+      log2('播放结束 code=' + String(code))
+      if (!aborted) finish()
+    })
+    return () => { aborted = true; try { player.kill() } catch { /* 忽略 */ } }
+  }
+
+  /** 预合成队首句（未在进行且未就绪且未失败时）；世代号防过期结果污染。 */
+  function ensurePreSynth(log2: (m: string) => void): void {
+    if (preSynth || preReady || preFailed || liveQueue.length === 0) return
+    const s = liveQueue[0]
+    const epoch = liveEpoch
+    log2('预合成: ' + s.slice(0, 30))
+    preSynth = synthesizeSpeech({ text: s, voice: cfg.voice, rate: cfg.rate, pitch: cfg.pitch })
+      .then((buf) => {
+        preSynth = null
+        if (epoch !== liveEpoch) return
+        preReady = buf
+      })
+      .catch((e) => {
+        preSynth = null
+        if (epoch !== liveEpoch) return
+        preFailed = true
+        log2('预合成失败: ' + (e instanceof Error ? e.message : String(e)))
+      })
+  }
+
+  /** 队列调度：优先用预合成 Buffer 无缝续播；播放启动后立即预合成下一句。 */
   function pumpLive(log2: (m: string) => void): void {
     if (livePlaying || liveQueue.length === 0) return
+    // 预合成进行中：等待完成再播（避免重复合成同一句）
+    if (preSynth) {
+      livePlaying = true
+      preSynth.then(() => { livePlaying = false; pumpLive(log2) }).catch(() => { livePlaying = false; pumpLive(log2) })
+      return
+    }
     livePlaying = true
     const s = liveQueue.shift() as string
-    log2('实时朗读: ' + s.slice(0, 40))
-    liveStop = speakEdgeTts(s, cfg, log2, instId, () => {
+    const next = (): void => { livePlaying = false; liveStop = null; ensurePreSynth(log2); pumpLive(log2) }
+    if (preReady) {
+      const buf = preReady
+      preReady = null
+      log2('实时朗读(预合成): ' + s.slice(0, 40))
+      liveStop = playBuffer(buf, log2, next)
+    } else if (preFailed) {
+      preFailed = false
+      log2('跳过预合成失败的句子: ' + s.slice(0, 30))
       livePlaying = false
-      liveStop = null
+      ensurePreSynth(log2)
       pumpLive(log2)
-    })
+    } else {
+      log2('实时朗读(现场合成): ' + s.slice(0, 40))
+      liveStop = speakEdgeTts(s, cfg, log2, instId, next)
+    }
+    // 播放启动后立即预合成下一句（livePlaying 为 true，feedLive 的 ensurePreSynth 也会兜底）
+    ensurePreSynth(log2)
   }
   function stopLiveRead(log2: (m: string) => void): void {
     if (liveStop || liveQueue.length || liveBuf) log2('打断实时朗读（队列 ' + liveQueue.length + ' 句，剩余缓冲 ' + liveBuf.length + ' 字）')
@@ -401,12 +460,20 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     livePlaying = false
     liveQueue.length = 0
     liveBuf = ''
+    liveEpoch += 1
+    preSynth = null
+    preReady = null
+    preFailed = false
   }
   /** 新回合开始：清掉未念的积压句子与残余缓冲，但不掐正在播放的句子（输入信息不打断语音）。 */
   function flushLive(log2: (m: string) => void): void {
     if (liveQueue.length || liveBuf) log2('新回合开始，清掉积压实时朗读（队列 ' + liveQueue.length + ' 句，缓冲 ' + liveBuf.length + ' 字）；正在播放的继续念完')
     liveQueue.length = 0
     liveBuf = ''
+    liveEpoch += 1
+    preSynth = null
+    preReady = null
+    preFailed = false
   }
   function feedLive(text: string, log2: (m: string) => void): void {
     liveBuf += text
@@ -429,6 +496,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     }
     liveBuf = rest
     for (const s of ready) liveQueue.push(s)
+    ensurePreSynth(log2)
     pumpLive(log2)
   }
 
