@@ -383,9 +383,10 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   let livePlaying = false
   let liveStop: (() => void) | null = null
   let summaryPlaying = false
-  // 预合成流水线：当前句播放时后台合成队首下一句（Buffer 缓存），播完无缝衔接
+  // 预合成流水线：当前句播放时后台合成队首下一句（Buffer 缓冲队列，最多 2 句），
+  // 播完无缝衔接；2 句缓冲抗单次合成慢/失败，偶发网络抖动不露间隔
   let preSynth: Promise<void> | null = null
-  let preReady: Buffer | null = null
+  const preReadyQueue: Buffer[] = []
   let preFailed = false
   let liveEpoch = 0
   /** 播放已合成的 Buffer（ffplay stdin），播完触发 onDone 驱动流水线。 */
@@ -404,17 +405,20 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     return () => { aborted = true; try { player.kill() } catch { /* 忽略 */ } }
   }
 
-  /** 预合成队首句（未在进行且未就绪且未失败时）；世代号防过期结果污染。 */
+  /** 预合成流水线：把队列前部未合成的句子预合成进缓冲（最多 2 句）；世代号防过期结果污染。 */
   function ensurePreSynth(log2: (m: string) => void): void {
-    if (preSynth || preReady || preFailed || liveQueue.length === 0) return
-    const s = liveQueue[0]
+    if (preSynth || preFailed || preReadyQueue.length >= 2) return
+    const pending = liveQueue.length - preReadyQueue.length
+    if (pending <= 0) return
+    const s = liveQueue[preReadyQueue.length]
     const epoch = liveEpoch
     log2('预合成: ' + s.slice(0, 30))
     preSynth = synthesizeSpeech({ text: s, voice: cfg.voice, rate: cfg.rate, pitch: cfg.pitch })
       .then((buf) => {
         preSynth = null
         if (epoch !== liveEpoch) return
-        preReady = buf
+        preReadyQueue.push(buf)
+        ensurePreSynth(log2)
       })
       .catch((e) => {
         preSynth = null
@@ -437,9 +441,8 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     livePlaying = true
     const s = liveQueue.shift() as string
     const next = (): void => { livePlaying = false; liveStop = null; ensurePreSynth(log2); pumpLive(log2) }
-    if (preReady) {
-      const buf = preReady
-      preReady = null
+    if (preReadyQueue.length > 0) {
+      const buf = preReadyQueue.shift() as Buffer
       log2('实时朗读(预合成): ' + s.slice(0, 40))
       liveStop = playBuffer(buf, log2, next)
     } else if (preFailed) {
@@ -464,7 +467,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     liveBuf = ''
     liveEpoch += 1
     preSynth = null
-    preReady = null
+    preReadyQueue.length = 0
     preFailed = false
   }
   /** 新回合开始：清掉未念的积压句子与残余缓冲，但不掐正在播放的句子（输入信息不打断语音）。 */
@@ -474,7 +477,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     liveBuf = ''
     liveEpoch += 1
     preSynth = null
-    preReady = null
+    preReadyQueue.length = 0
     preFailed = false
   }
   function feedLive(text: string, log2: (m: string) => void): void {
