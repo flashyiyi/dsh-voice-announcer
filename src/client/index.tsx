@@ -31,6 +31,7 @@ interface VoiceAnnouncerSettings {
   liveRead?: boolean
   liveReadActiveOnly?: boolean
   liveReadMaxQueue?: number
+  debugLog?: boolean
 }
 
 /** edge-tts 常用音色（与「自动」并列，可试听）。 */
@@ -70,6 +71,7 @@ const FIELDS: FieldDef[] = [
   { key: 'liveRead', label: '实时朗读', hint: '生成回复时边出边念（仅 edge-tts，逐句合成流式播放，无需等待完整回复）', type: 'bool' },
   { key: 'liveReadActiveOnly', label: '仅当前活动会话', hint: '只朗读当前正在查看的会话；关闭则所有会话的回复都实时朗读', type: 'bool' },
   { key: 'liveReadMaxQueue', label: '跳跃阈值', hint: '待念队列超过此句数时丢弃旧文本、跳到最新内容（实时朗读追不上时）', type: 'number', min: 1, max: 10, step: 1, suffix: '句' },
+  { key: 'debugLog', label: '详细日志', hint: '记录实时朗读/预合成/打断等诊断日志（排查问题时开启）；关键事件始终记录', type: 'bool' },
 ]
 
 /** CSS 变量别名（与官方 dsw-alias 一致）。 */

@@ -12,3 +12,4 @@
         liveRead: true
         liveReadActiveOnly: true
         liveReadMaxQueue: 5
+        debugLog: false

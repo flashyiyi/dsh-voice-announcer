@@ -34,6 +34,8 @@ export interface Config {
   liveReadActiveOnly?: boolean
   /** 跟读跳跃阈值：待念队列超过此句数时丢弃旧文本跳到最新；默认 3 */
   liveReadMaxQueue?: number
+  /** 详细诊断日志（实时朗读/预合成/打断/跳跃等），默认关闭；关键事件（启动/异常/配置变更）始终记录 */
+  debugLog?: boolean
 }
 
 export type ConfigType = Required<Config>
@@ -50,6 +52,7 @@ const DEFAULTS: ConfigType = {
   liveRead: true,
   liveReadActiveOnly: true,
   liveReadMaxQueue: 5,
+  debugLog: false,
 }
 
 const COMPLETED_KINDS = new Set(['completed', 'error', 'max-tokens', 'aborted', 'interrupted'])
@@ -355,6 +358,7 @@ const VoiceAnnouncerSettings = z.object({
   liveRead: z.boolean().default(DEFAULTS.liveRead),
   liveReadActiveOnly: z.boolean().default(DEFAULTS.liveReadActiveOnly),
   liveReadMaxQueue: z.number().min(1).max(20).default(DEFAULTS.liveReadMaxQueue),
+  debugLog: z.boolean().default(DEFAULTS.debugLog),
 })
 
 /** 接入 settings：有服务则 Web 设置页可改（live 生效），无服务则 entry 配置照常。 */
@@ -381,7 +385,15 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     cfg.voice = RESOLVED_VOICE_DEFAULT
   }
   const logPath = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'voice-announcer.log');
-  const log = (msg: string): void => { try { mkdirSync(join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector'), { recursive: true }); appendFileSync(logPath, '[' + new Date().toISOString() + '] ' + msg + '\n') } catch {} };
+  // 诊断类日志只在 debugLog 开启时记录；关键事件（启动/配置变更/路由/播报/ffplay 失败等）始终记录
+  const DEBUG_ONLY = /实时朗读|预合成|打断|跳跃|缓冲超时|当前活动会话|跳过子代理|收到 turn\/end|合成失败|播放异常|降级|新回合|外部朗读(预合成|实时|打断|请求)/;
+  const log = (msg: string): void => {
+    try {
+      if (!cfg.debugLog && DEBUG_ONLY.test(msg)) return
+      mkdirSync(join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector'), { recursive: true })
+      appendFileSync(logPath, '[' + new Date().toISOString() + '] ' + msg + '\n')
+    } catch {}
+  };
   const instId = Math.random().toString(36).slice(2, 8)
   log('插件启动（实例 ' + instId + '），enabled=' + cfg.enabled + ' engine=' + cfg.engine);
   installVoiceSettings(ctx, cfg, config, log);
