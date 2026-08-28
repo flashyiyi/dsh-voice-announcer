@@ -532,7 +532,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       pumpLive(log)
     }
   }, 1000)
-  ctx.on('dispose', () => clearInterval(flushTimer))
+  ;(ctx.on as any)('dispose', () => clearInterval(flushTimer))
 
   // 试听路由：POST /voice-announcer/preview {voice, text?} → 合成 mp3 返回（client 浏览器播放）
   // handler 是 async 函数；effect 回调保持同步，返回 disposer
