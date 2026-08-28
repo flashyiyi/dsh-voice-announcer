@@ -379,6 +379,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   let activeSessionId: string | undefined
   let activeWarned = false
   let liveBuf = ''
+  let lastChunkAt = 0
   const liveQueue: string[] = []
   let livePlaying = false
   let liveStop: (() => void) | null = null
@@ -493,6 +494,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     preSynthFailCount = 0
   }
   function feedLive(text: string, log2: (m: string) => void): void {
+    lastChunkAt = Date.now()
     liveBuf += text
     // 强边界（句号/感叹/问号/分号/换行）整句切出；lookbehind 保留边界在句末
     const parts = liveBuf.split(/(?<=[。！？!?；;\n])/)
@@ -516,6 +518,21 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     ensurePreSynth(log2)
     pumpLive(log2)
   }
+  // 缓冲超时强制切句：模型输出停顿（>2s 无新 chunk）时，把未到边界的缓冲也念掉，
+  // 避免工具执行/思考期间残留文本长时间不念（表现为「实时朗读没有了」）
+  const flushTimer = setInterval(() => {
+    if (!cfg.liveRead || !liveBuf) return
+    if (Date.now() - lastChunkAt < 2000) return
+    const s = stripMd(liveBuf)
+    liveBuf = ''
+    if (s) {
+      log('缓冲超时切句: ' + s.slice(0, 40))
+      liveQueue.push(s)
+      ensurePreSynth(log)
+      pumpLive(log)
+    }
+  }, 1000)
+  ctx.on('dispose', () => clearInterval(flushTimer))
 
   // 试听路由：POST /voice-announcer/preview {voice, text?} → 合成 mp3 返回（client 浏览器播放）
   // handler 是 async 函数；effect 回调保持同步，返回 disposer
