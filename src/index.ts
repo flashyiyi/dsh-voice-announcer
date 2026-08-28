@@ -418,17 +418,19 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     const s = liveQueue[preReadyQueue.length]
     const epoch = liveEpoch
     log2('预合成: ' + s.slice(0, 30))
-    preSynth = synthesizeSpeech({ text: s, voice: cfg.voice, rate: cfg.rate, pitch: cfg.pitch }, 8000)
+    let p: Promise<void>
+    p = synthesizeSpeech({ text: s, voice: cfg.voice, rate: cfg.rate, pitch: cfg.pitch }, 8000)
       .then((buf) => {
-        preSynth = null
-        if (epoch !== liveEpoch) return
+        // 只清自己的引用（跳跃/打断可能已换新 preSynth，不能误清）
+        if (preSynth === p) preSynth = null
+        if (epoch !== liveEpoch) { ensurePreSynth(log2); return }
         preSynthFailCount = 0
         preReadyQueue.push(buf)
         ensurePreSynth(log2)
       })
       .catch((e) => {
-        preSynth = null
-        if (epoch !== liveEpoch) return
+        if (preSynth === p) preSynth = null
+        if (epoch !== liveEpoch) { ensurePreSynth(log2); return }
         preFailed = true
         preSynthFailCount += 1
         log2('预合成失败(' + preSynthFailCount + '): ' + (e instanceof Error ? e.message : String(e)))
@@ -437,6 +439,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
           log2('网络不佳，实时朗读降级为现场流式（本回合不再预合成）')
         }
       })
+    preSynth = p
   }
 
   /** 队列调度：优先用预合成 Buffer 无缝续播；播放启动后立即预合成下一句。
@@ -481,6 +484,20 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     preSynthDisabled = false
     preSynthFailCount = 0
   }
+  /** 实时朗读队列最多积压的待念句数（超过即跳跃丢弃旧句）。 */
+  const LIVE_MAX_QUEUE = 3
+  /** 跟读跳跃：队列积压超过 LIVE_MAX_QUEUE 时丢弃最旧句子，只留最新内容；
+   * 不打断正在播放的句子（念完自然切到最新），预合成作废并重新预合成最新句。 */
+  function jumpToLatest(log2: (m: string) => void): void {
+    const overflow = liveQueue.length - LIVE_MAX_QUEUE
+    if (overflow <= 0) return
+    liveQueue.splice(0, overflow)
+    preReadyQueue.length = 0
+    liveEpoch += 1
+    preSynth = null
+    log2('积压跳跃：丢弃 ' + overflow + ' 句旧文本，跳到最新（剩余队列 ' + liveQueue.length + ' 句）')
+    ensurePreSynth(log2)
+  }
   /** 新回合开始：清掉未念的积压句子与残余缓冲，但不掐正在播放的句子（输入信息不打断语音）。 */
   function flushLive(log2: (m: string) => void): void {
     if (liveQueue.length || liveBuf) log2('新回合开始，清掉积压实时朗读（队列 ' + liveQueue.length + ' 句，缓冲 ' + liveBuf.length + ' 字）；正在播放的继续念完')
@@ -515,6 +532,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     }
     liveBuf = rest
     for (const s of ready) liveQueue.push(s)
+    jumpToLatest(log2)
     ensurePreSynth(log2)
     pumpLive(log2)
   }
