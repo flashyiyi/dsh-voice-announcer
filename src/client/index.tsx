@@ -273,7 +273,7 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                               <select
-                                value={isVoiceKnown ? String(cur ?? '') : '__custom__'}
+                                value={!isVoiceKnown || voiceCustom ? '__custom__' : String(cur ?? '')}
                                 disabled={fieldDisabled(field)}
                                 onChange={(e) => {
                                   const val = e.target.value
