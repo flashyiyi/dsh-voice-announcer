@@ -402,6 +402,12 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     liveQueue.length = 0
     liveBuf = ''
   }
+  /** 新回合开始：清掉未念的积压句子与残余缓冲，但不掐正在播放的句子（输入信息不打断语音）。 */
+  function flushLive(log2: (m: string) => void): void {
+    if (liveQueue.length || liveBuf) log2('新回合开始，清掉积压实时朗读（队列 ' + liveQueue.length + ' 句，缓冲 ' + liveBuf.length + ' 字）；正在播放的继续念完')
+    liveQueue.length = 0
+    liveBuf = ''
+  }
   function feedLive(text: string, log2: (m: string) => void): void {
     liveBuf += text
     // 强边界（句号/感叹/问号/分号/换行）整句切出；lookbehind 保留边界在句末
@@ -529,11 +535,13 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
         }
         return
       }
-      // 新轮开始 / 用户发消息：打断实时朗读
-      if (type === 'turn/start' || type === 'user/message') {
-        stopLiveRead(log)
+      // 新轮开始：清积压旧句但不掐正在播放的句子（输入信息不打断语音）
+      if (type === 'turn/start') {
+        flushLive(log)
         return
       }
+      // 用户发消息：完全不打断实时朗读（只有结束通知语音才打断）
+      if (type === 'user/message') return
       if (type !== 'turn/end') return;
       log('实例 ' + instId + ' 收到 turn/end turn=' + String(event?.data?.turn ?? '?'))
       if (!cfg.enabled) return;
