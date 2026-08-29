@@ -6,9 +6,9 @@
 import type { Context } from 'cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { synthesizeSpeech, synthesizeSpeechStream, closeConnectionPool } from './edge-tts.js'
 
@@ -21,7 +21,8 @@ export interface Config {
   enabled?: boolean
   /** 播报引擎：edge-tts（晓晓神经网络音质，需联网+ffmpeg）/ sapi（本地离线可靠） */
   engine?: 'edge-tts' | 'sapi'
-  voice?: string
+  /** 会话音色池（勾选的中文音色）；新会话按索引轮转分配，单勾 = 全会话一种声音 */
+  voices?: string[]
   rate?: string
   pitch?: string
   announceCompleted?: boolean
@@ -32,6 +33,8 @@ export interface Config {
   liveRead?: boolean
   /** 实时朗读只读当前活动会话（前端上报活动会话 id）；默认开启 */
   liveReadActiveOnly?: boolean
+  /** 多会话实时朗读重叠：默认关闭（全局串行，同一时间只念一个会话）；开启后不同会话可同时朗读（同会话仍串行） */
+  overlapLive?: boolean
   /** 跟读跳跃阈值：待念队列超过此句数时丢弃旧文本跳到最新；默认 3 */
   liveReadMaxQueue?: number
   /** 详细诊断日志（实时朗读/预合成/打断/跳跃等），默认关闭；关键事件（启动/异常/配置变更）始终记录 */
@@ -40,17 +43,28 @@ export interface Config {
 
 export type ConfigType = Required<Config>
 
+/** 内置中文音色池（edge-tts，按轮转顺序）：普通话 6 + 方言 2 + 粤语 3 + 台湾 3。 */
+const CHINESE_VOICES = [
+  'zh-CN-XiaoxiaoNeural', 'zh-CN-XiaoyiNeural', 'zh-CN-YunxiNeural', 'zh-CN-YunyangNeural', 'zh-CN-YunjianNeural', 'zh-CN-YunxiaNeural',
+  'zh-CN-liaoning-XiaobeiNeural', 'zh-CN-shaanxi-XiaoniNeural',
+  'zh-HK-HiuGaaiNeural', 'zh-HK-HiuMaanNeural', 'zh-HK-WanLungNeural',
+  'zh-TW-HsiaoChenNeural', 'zh-TW-HsiaoYuNeural', 'zh-TW-YunJheNeural',
+]
+const DEFAULT_VOICE = CHINESE_VOICES[0]
+
 const DEFAULTS: ConfigType = {
   enabled: true,
   engine: 'edge-tts',
-  voice: 'auto',
+  // 空数组 = 未筛选，使用全部中文音色（默认状态）；勾选后为筛选池
+  voices: [],
   rate: '+0%',
   pitch: '+0Hz',
   announceCompleted: true,
   announceError: true,
   announceSubagent: false,
   liveRead: true,
-  liveReadActiveOnly: true,
+  liveReadActiveOnly: false,
+  overlapLive: true,
   liveReadMaxQueue: 5,
   debugLog: false,
 }
@@ -218,23 +232,6 @@ const LANG_TEXTS: Record<string, Record<string, string>> = {
  * 语言的具体音色（如 ja-JP-NanamiNeural），播报文案会按音色前缀
  * 自动切换。未来若 DSH 扩展界面语言支持，此处只需补充映射即可。
  */
-function userLocale(ctx: AppContext): string | undefined {
-  try {
-    const s = typeof (ctx as any).get === 'function' ? (ctx as any).get('settings') : undefined
-    const loc = s?.get?.('locale') as { preference?: string } | undefined
-    const pref = loc?.preference
-    return pref === 'zh' || pref === 'en' ? pref : undefined
-  } catch { return undefined }
-}
-
-/** 按界面语言解析默认音色：voice 为 auto/未设置时调用。 */
-function resolveVoiceByLocale(ctx: AppContext, fallback: string): string {
-  const loc = userLocale(ctx)
-  if (loc === 'zh') return 'zh-CN-XiaoxiaoNeural'
-  if (loc === 'en') return 'en-US-AriaNeural'
-  return fallback
-}
-
 /** 按 voice 取语言包（默认 zh）。 */
 function langPack(voice: string): Record<string, string> {
   const m = /^([a-z]{2,3})(-|$)/i.exec(voice || '')
@@ -281,7 +278,7 @@ function speakSapi(text: string, log: (m: string) => void): void {
  * ffplay 不可用时降级 SAPI 播报。
  * 完成通知（onDone）：ffplay close 一律触发（播完/崩溃/合成失败/被打断），
  * finished 防重；句子播放队列靠它恢复，避免合成失败后 livePlaying 卡死。 */
-function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, instId?: string, onDone?: () => void): () => void {
+function speakEdgeTts(text: string, vcfg: { voice: string; rate: string; pitch: string }, log: (m: string) => void, instId?: string, onDone?: () => void): () => void {
   let aborted = false
   let finished = false
   const finish = (): void => {
@@ -303,7 +300,7 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, i
   })
   player.stdin?.on('error', (e) => { log('播放输入流写入失败: ' + e.message) })
   synthesizeSpeechStream(
-    { text, voice: cfg.voice, rate: cfg.rate, pitch: cfg.pitch },
+    { text, voice: vcfg.voice, rate: vcfg.rate, pitch: vcfg.pitch },
     (chunk) => {
       if (aborted) return
       try {
@@ -333,13 +330,13 @@ function speakEdgeTts(text: string, cfg: ConfigType, log: (m: string) => void, i
 }
 
 const BOOT_LOG = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'voice-announcer.log')
-try { appendFileSync(BOOT_LOG, '[' + new Date().toISOString() + '] MODULE-LOAD v4\n') } catch {}
+try { appendFileSync(BOOT_LOG, '[' + new Date().toISOString() + '] MODULE-LOAD v5\n') } catch {}
 
 /** 设置命名空间 schema（与 Config 同构；schemastery 字段默认值 = DEFAULTS）。 */
 const VoiceAnnouncerSettings = z.object({
   enabled: z.boolean().default(DEFAULTS.enabled),
   engine: z.union(['edge-tts', 'sapi']).default(DEFAULTS.engine),
-  voice: z.string().default(DEFAULTS.voice),
+  voices: z.array(z.string()).default(DEFAULTS.voices),
   rate: z.string().default(DEFAULTS.rate),
   pitch: z.string().default(DEFAULTS.pitch),
   announceCompleted: z.boolean().default(DEFAULTS.announceCompleted),
@@ -347,6 +344,7 @@ const VoiceAnnouncerSettings = z.object({
   announceSubagent: z.boolean().default(DEFAULTS.announceSubagent),
   liveRead: z.boolean().default(DEFAULTS.liveRead),
   liveReadActiveOnly: z.boolean().default(DEFAULTS.liveReadActiveOnly),
+  overlapLive: z.boolean().default(DEFAULTS.overlapLive),
   liveReadMaxQueue: z.number().min(1).max(20).default(DEFAULTS.liveReadMaxQueue),
   debugLog: z.boolean().default(DEFAULTS.debugLog),
 })
@@ -355,24 +353,38 @@ const VoiceAnnouncerSettings = z.object({
 function installVoiceSettings(ctx: AppContext, cfg: ConfigType, entry: Partial<ConfigType>, log: (m: string) => void): void {
   let source: () => ConfigType = () => ({ ...DEFAULTS, ...entry } as ConfigType)
   installSettingsSection(ctx, settingsNamespace('voice-announcer'), VoiceAnnouncerSettings, { ...DEFAULTS, ...entry }, {
-    setSource: (current) => { source = current as () => ConfigType },
+    setSource: (current) => {
+      source = current as () => ConfigType
+      // 立即生效一次：设置文档已保存的用户配置（如 voices）启动即同步进 cfg，
+      // 避免 settings onChange 生效前（apply 后的一瞬）用 DEFAULTS/patch 配置分配音色
+      try {
+        const cur = source()
+        if (cur && typeof cur === 'object') Object.assign(cfg, cur)
+        if (!Array.isArray(cfg.voices)) cfg.voices = []
+      } catch { /* 忽略 */ }
+    },
     onChange: () => {
       Object.assign(cfg, source())
-      // 音色为 auto 时重新解析（用户重置音色后回到界面语言默认）
-      if (cfg.voice === 'auto') cfg.voice = resolveVoiceByLocale(ctx, 'zh-CN-XiaoxiaoNeural')
-      log('设置已更新（即时生效）: engine=' + cfg.engine + ' voice=' + cfg.voice + ' enabled=' + cfg.enabled)
+      // 音色池非数组时兜底为空（= 全部音色）
+      if (!Array.isArray(cfg.voices)) cfg.voices = []
+      log('设置已更新（即时生效）: engine=' + cfg.engine + ' 音色池=' + (cfg.voices.length === 0 ? '全部(' + CHINESE_VOICES.length + ')' : cfg.voices.length + ' 个') + ' enabled=' + cfg.enabled)
     },
   })
 }
 
 export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
-  try { appendFileSync(BOOT_LOG, '[' + new Date().toISOString() + '] APPLY v4\n') } catch {}
-  // 用户未显式设置音色时，按界面语言选默认音色（设置了就用用户的，永不覆盖）
-  // fallback 必须是具体音色（不能是 auto），否则 locale 未设置时会死循环成 auto
-  const RESOLVED_VOICE_DEFAULT = resolveVoiceByLocale(ctx, 'zh-CN-XiaoxiaoNeural')
+  try { appendFileSync(BOOT_LOG, '[' + new Date().toISOString() + '] APPLY v5\n') } catch {}
   const cfg: ConfigType = { ...DEFAULTS, ...config }
-  if (cfg.voice === 'auto' || cfg.voice === undefined) {
-    cfg.voice = RESOLVED_VOICE_DEFAULT
+  // 音色池规范化：过滤非法项；空数组 = 全部中文音色（默认状态，用户未筛选时全量轮转）。
+  // 旧版 voice 字段（string 且非 auto）迁移为单音色池，尊重旧选择。
+  const rawVoices = Array.isArray(cfg.voices) ? cfg.voices.filter((v: unknown) => typeof v === 'string' && v) : []
+  if (rawVoices.length === 0) {
+    const legacy = typeof (config as any).voice === 'string' && (config as any).voice && (config as any).voice !== 'auto'
+      ? (config as any).voice
+      : undefined
+    cfg.voices = legacy ? [legacy] : []
+  } else {
+    cfg.voices = rawVoices
   }
   const logPath = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'voice-announcer.log');
   // 诊断类日志只在 debugLog 开启时记录；关键事件（启动/配置变更/路由/播报/ffplay 失败等）始终记录
@@ -385,18 +397,54 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     } catch {}
   };
   const instId = Math.random().toString(36).slice(2, 8)
-  log('插件启动（实例 ' + instId + '），enabled=' + cfg.enabled + ' engine=' + cfg.engine);
+  log('插件启动（实例 ' + instId + '），enabled=' + cfg.enabled + ' engine=' + cfg.engine + ' 音色池=' + (cfg.voices.length === 0 ? '全部(' + CHINESE_VOICES.length + ')' : cfg.voices.length + ' 个'));
   installVoiceSettings(ctx, cfg, config, log);
-  // 实时朗读状态（apply 闭包内，每实例独立）。句子按序排队，
+
+  // ── 会话 → 音色分配（按索引轮转）──
+  // 已分配会话固定音色（跨重启持久化）；新会话取 voices[counter % voices.length]。
+  // 用户改筛选列表后，新会话按新列表长度取模，天然对得上；已分配会话不受影响。
+  const VOICE_STORE = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'voice-announcer-session-voices.json')
+  let voiceCounter = 0
+  const voiceAssignments = new Map<string, string>()
+  try {
+    const j = JSON.parse(readFileSync(VOICE_STORE, 'utf8'))
+    voiceCounter = Number((j as any)?.counter ?? 0) || 0
+    const a = (j as any)?.assignments
+    if (a && typeof a === 'object') {
+      for (const [k, v] of Object.entries(a)) if (typeof v === 'string') voiceAssignments.set(k, v)
+    }
+  } catch { /* 无存档 */ }
+  const saveVoiceStore = (): void => {
+    try {
+      mkdirSync(dirname(VOICE_STORE), { recursive: true })
+      writeFileSync(VOICE_STORE, JSON.stringify({ counter: voiceCounter, assignments: Object.fromEntries(voiceAssignments) }, null, 2))
+    } catch { /* 忽略 */ }
+  }
+  /** 会话音色：已分配固定返回；未分配按索引轮转分配并持久化。 */
+  function resolveVoiceFor(sessionId: string, log2: (m: string) => void): string {
+    const hit = voiceAssignments.get(sessionId)
+    if (hit) return hit
+    const pool = cfg.voices.length ? cfg.voices : CHINESE_VOICES
+    const voice = pool[voiceCounter % pool.length] ?? DEFAULT_VOICE
+    voiceAssignments.set(sessionId, voice)
+    voiceCounter += 1
+    saveVoiceStore()
+    log2('会话音色分配 ' + sessionId.slice(0, 12) + ' → ' + voice)
+    return voice
+  }
+  // 实时朗读状态（apply 闭包内，每实例独立）。句子按序排队（全局单队列），
   // 念完一句（ffplay close）再念下一句——不被后续句子互相掐断；
   // 只有 turn/start、user/message、结束通知播报才打断清队。
+  // 多会话：默认重叠（不同会话可同时念，音色不同可区分）；overlapLive 关闭后
+  // 回退全局串行（同一时间只念一个会话），同会话始终串行不重叠。
   let activeSessionId: string | undefined
   let activeWarned = false
   let liveBuf = ''
   let lastChunkAt = 0
-  const liveQueue: string[] = []
+  const liveQueue: { text: string; voice: string; sessionId: string }[] = []
   let livePlaying = false
-  let liveStop: (() => void) | null = null
+  /** 正在播放的实时朗读 kill 句柄集合（重叠模式可能多个并存）；stopLiveRead 逐个掐断 */
+  const liveStops = new Set<() => void>()
   let summaryPlaying = false
   // 预合成流水线：当前句播放时后台合成队首下一句（Buffer 缓冲队列，最多 2 句），
   // 播完无缝衔接；2 句缓冲抗单次合成慢/失败，偶发网络抖动不露间隔
@@ -406,6 +454,8 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   let preSynthDisabled = false
   let preSynthFailCount = 0
   let liveEpoch = 0
+  /** 重叠播放（overlapLive=true）下正在发声/等待预合成的会话集合；同会话不重叠，不同会话可并行。 */
+  const liveActiveSessions = new Set<string>()
   /** 播放已合成的 Buffer（ffplay stdin），播完触发 onDone 驱动流水线。 */
   function playBuffer(buf: Buffer, log2: (m: string) => void, onDone: () => void): () => void {
     let aborted = false
@@ -426,13 +476,15 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
    * 预合成用短超时（8s）：网络抖动时快速失败，不阻塞实时朗读；
    * 连续失败 2 次自动降级为纯现场流式（每句首块 ~0.6s 出声，不哑）。 */
   function ensurePreSynth(log2: (m: string) => void): void {
+    if (cfg.overlapLive) return // 重叠模式：现场流式（首块 ~0.6s 出声），不做预合成
     if (preSynth || preFailed || preSynthDisabled || preReadyQueue.length >= 2) return
     const pending = liveQueue.length - preReadyQueue.length
     if (pending <= 0) return
     const s = liveQueue[preReadyQueue.length]
+    if (!s) return
     const epoch = liveEpoch
     let p: Promise<void>
-    p = synthesizeSpeech({ text: s, voice: cfg.voice, rate: cfg.rate, pitch: cfg.pitch }, 8000)
+    p = synthesizeSpeech({ text: s.text, voice: s.voice, rate: cfg.rate, pitch: cfg.pitch }, 8000)
       .then((buf) => {
         // 只清自己的引用（跳跃/打断可能已换新 preSynth，不能误清）
         if (preSynth === p) preSynth = null
@@ -456,9 +508,31 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   }
 
   /** 队列调度：优先用预合成 Buffer 无缝续播；播放启动后立即预合成下一句。
+   * 多会话：默认重叠（不同会话并行，音色不同可区分）；overlapLive 关闭后回退
+   * 全局串行（同一时间只念一个会话），同会话仍按队列顺序串行（不重叠）。重叠模式禁用预合成（现场流式）。
    * 总结播报（summaryPlaying）期间不播，等总结念完自动续上。 */
   function pumpLive(log2: (m: string) => void): void {
-    if (summaryPlaying || livePlaying || liveQueue.length === 0) return
+    if (summaryPlaying || liveQueue.length === 0) return
+    // ── 重叠模式（overlapLive=true）：跳过正在发声会话的句子，找第一个空闲会话的句子播
+    if (cfg.overlapLive) {
+      let idx = 0
+      while (idx < liveQueue.length && liveActiveSessions.has(liveQueue[idx].sessionId)) idx += 1
+      if (idx >= liveQueue.length) return
+      const s = liveQueue.splice(idx, 1)[0] as { text: string; voice: string; sessionId: string }
+      liveActiveSessions.add(s.sessionId)
+      let kill: () => void = () => {}
+      const next = (): void => {
+        liveStops.delete(kill)
+        liveActiveSessions.delete(s.sessionId)
+        pumpLive(log2)
+      }
+      log2('实时朗读(重叠): ' + s.text.slice(0, 40))
+      kill = speakEdgeTts(s.text, { voice: s.voice, rate: cfg.rate, pitch: cfg.pitch }, log2, instId, next)
+      liveStops.add(kill)
+      return
+    }
+    // ── 串行模式（默认）：任一在播/在等即 return（现状行为）
+    if (livePlaying) return
     // 预合成进行中：等待完成再播（避免重复合成同一句）
     if (preSynth) {
       livePlaying = true
@@ -466,27 +540,34 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       return
     }
     livePlaying = true
-    const s = liveQueue.shift() as string
-    const next = (): void => { livePlaying = false; liveStop = null; ensurePreSynth(log2); pumpLive(log2) }
+    const s = liveQueue.shift() as { text: string; voice: string; sessionId: string }
+    let kill: () => void = () => {}
+    const next = (): void => {
+      livePlaying = false
+      liveStops.delete(kill)
+      ensurePreSynth(log2)
+      pumpLive(log2)
+    }
     if (preReadyQueue.length > 0) {
       const buf = preReadyQueue.shift() as Buffer
-      log2('实时朗读(预合成): ' + s.slice(0, 40))
-      liveStop = playBuffer(buf, log2, next)
+      log2('实时朗读(预合成): ' + s.text.slice(0, 40))
+      kill = playBuffer(buf, log2, next)
     } else if (preFailed) {
       preFailed = false
-      log2('实时朗读(预合成失败→现场流式): ' + s.slice(0, 40))
-      liveStop = speakEdgeTts(s, cfg, log2, instId, next)
+      log2('实时朗读(预合成失败→现场流式): ' + s.text.slice(0, 40))
+      kill = speakEdgeTts(s.text, { voice: s.voice, rate: cfg.rate, pitch: cfg.pitch }, log2, instId, next)
     } else {
-      log2('实时朗读(现场合成): ' + s.slice(0, 40))
-      liveStop = speakEdgeTts(s, cfg, log2, instId, next)
+      log2('实时朗读(现场合成): ' + s.text.slice(0, 40))
+      kill = speakEdgeTts(s.text, { voice: s.voice, rate: cfg.rate, pitch: cfg.pitch }, log2, instId, next)
     }
+    liveStops.add(kill)
     // 播放启动后立即预合成下一句（livePlaying 为 true，feedLive 的 ensurePreSynth 也会兜底）
     ensurePreSynth(log2)
   }
   function stopLiveRead(log2: (m: string) => void): void {
-    if (liveStop || liveQueue.length || liveBuf) log2('打断实时朗读（队列 ' + liveQueue.length + ' 句，剩余缓冲 ' + liveBuf.length + ' 字）')
-    try { liveStop?.() } catch { /* 忽略 */ }
-    liveStop = null
+    if (liveStops.size || liveQueue.length || liveBuf) log2('打断实时朗读（队列 ' + liveQueue.length + ' 句，剩余缓冲 ' + liveBuf.length + ' 字）')
+    for (const k of liveStops) { try { k() } catch { /* 忽略 */ } }
+    liveStops.clear()
     livePlaying = false
     liveQueue.length = 0
     liveBuf = ''
@@ -496,6 +577,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     preFailed = false
     preSynthDisabled = false
     preSynthFailCount = 0
+    liveActiveSessions.clear()
   }
   /** 跟读跳跃：队列积压超过 cfg.liveReadMaxQueue 时丢弃最旧句子，只留最新内容；
    * 不打断正在播放的句子（念完自然切到最新），预合成作废并重新预合成最新句。 */
@@ -521,7 +603,9 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     preSynthDisabled = false
     preSynthFailCount = 0
   }
-  function feedLive(text: string, log2: (m: string) => void): void {
+  let lastLiveSessionId = ''
+  function feedLive(text: string, sessionId: string, log2: (m: string) => void): void {
+    lastLiveSessionId = sessionId
     lastChunkAt = Date.now()
     liveBuf += text
     // 强边界（句号/感叹/问号/分号/换行）整句切出；lookbehind 保留边界在句末
@@ -542,7 +626,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       }
     }
     liveBuf = rest
-    for (const s of ready) liveQueue.push(s)
+    for (const t of ready) liveQueue.push({ text: t, voice: resolveVoiceFor(sessionId, log2), sessionId })
     jumpToLatest(log2)
     ensurePreSynth(log2)
     pumpLive(log2)
@@ -556,13 +640,15 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     liveBuf = ''
     if (s) {
       log('缓冲超时切句: ' + s.slice(0, 40))
-      liveQueue.push(s)
+      liveQueue.push({ text: s, voice: resolveVoiceFor(lastLiveSessionId, log), sessionId: lastLiveSessionId })
       ensurePreSynth(log)
       pumpLive(log)
     }
   }, 1000)
   ;(ctx.on as any)('dispose', () => {
     clearInterval(flushTimer)
+    for (const k of liveStops) { try { k() } catch { /* 忽略 */ } }
+    liveStops.clear()
     closeConnectionPool()
   })
 
@@ -666,7 +752,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
               log('仅当前活动会话开启，但尚未收到前端活动会话上报——暂不限制，收到上报后精确生效')
             }
           }
-          feedLive(chunk.text, log)
+          feedLive(chunk.text, String(session?.id ?? ''), log)
         }
         return
       }
@@ -693,14 +779,15 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       if (!COMPLETED_KINDS.has(kind)) return;
       if (kind === 'completed' && !cfg.announceCompleted) return;
       if (kind !== 'completed' && !cfg.announceError) return;
-      const text = summarize(session, event, ctx, cfg.voice);
+      const vVoice = resolveVoiceFor(String(session?.id ?? ''), log)
+      const text = summarize(session, event, ctx, vVoice);
       stopLiveRead(log)
-      log('播报 turn=' + String(event?.data?.turn ?? '?') + ' 引擎=' + cfg.engine + ' 文本=' + text.slice(0, 40));
+      log('播报 turn=' + String(event?.data?.turn ?? '?') + ' 引擎=' + cfg.engine + ' 音色=' + vVoice + ' 文本=' + text.slice(0, 40));
       if (cfg.engine === 'sapi') {
         speakSapi(text, log)
       } else {
         summaryPlaying = true
-        speakEdgeTts(text, cfg, log, instId, () => {
+        speakEdgeTts(text, { voice: vVoice, rate: cfg.rate, pitch: cfg.pitch }, log, instId, () => {
           summaryPlaying = false
           pumpLive(log)
         })

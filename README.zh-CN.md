@@ -7,11 +7,12 @@ DSH（DeepSeek Harness）语音播报插件：监听每个会话的 `turn/end` �
 ## 功能
 
 - **播报清晰**：`会话名：第 N 轮对话结束了`，出错、中止、截断、打断各有专属文案
-- **8 种语言**：按音色语言自动切换播报文案（中/英/日/韩/法/德/俄/西），未知语言回退中文
+- **会话独立音色**：每个会话从勾选的音色池中按索引轮转分配一个中文音色并固定，新会话自动错开，跨重启保持
+- **音色筛选**：在设置界面勾选 14 个中文音色中的任意子集；只勾 1 个 = 全会话一种声音
 - **子代理可控**：子代理（subagent）会话默认静默，一键开启即可一并播报
 - **实时朗读**：回复生成过程中按句朗读（edge-tts，句子缓冲、预合成无缝衔接）；可只读当前活动会话，追不上时自动跳到最新内容
 - **Web 设置界面**：在 设置 → 插件配置 中完成全部配置，保存后即时生效，无需改配置文件
-- **音色试听**：音色下拉旁提供「试听」按钮，按当前语速与音调合成示例语音
+- **音色试听**：每个音色行都有「试听」按钮，按当前语速与音调合成示例语音
 - **双引擎**：edge-tts（神经网络音质，需联网）/ sapi（Windows 本地语音，离线可用）
 - **流式播放**：边合成边播放，无临时文件、无转码；首字约 0.6 秒内出声
 - **并发安全**：每次播报相互独立；多会话同时完成互不干扰、不丢播报
@@ -45,12 +46,13 @@ dsh plugin --profile web add dsh-voice-announcer
   config:
     enabled: true
     engine: edge-tts        # edge-tts / sapi
-    voice: auto              # auto：跟随界面语言；或指定音色 id
+    voices: []               # [] = 全部中文音色（默认）；或指定列表，如 [zh-CN-XiaoxiaoNeural, zh-CN-YunxiNeural]
+    overlapLive: true         # 多会话重叠朗读（默认开启）：不同音色的会话可同时朗读；设为 false 回退全局单队列
     announceCompleted: true
     announceError: true
     announceSubagent: false  # 是否播报子代理会话
     liveRead: true           # 实时朗读：回复生成时边出边念（仅 edge-tts）
-    liveReadActiveOnly: true # 只朗读当前活动会话
+    liveReadActiveOnly: false # 只朗读当前活动会话
     liveReadMaxQueue: 5      # 跟读跳跃阈值（待念队列句数）
 ```
 
@@ -60,39 +62,35 @@ dsh plugin --profile web add dsh-voice-announcer
 | --- | --- | --- |
 | enabled | true | 总开关 |
 | engine | edge-tts | 播报引擎；选择 sapi 时音色/语速/音调控件自动禁用 |
-| voice | auto | 音色 id（仅 edge-tts），见下；`auto` 按界面语言自动选择（中文→晓晓，英文→Aria），未设置时生效 |
+| voices | [] | 音色池（edge-tts 中文音色）。新会话按索引轮转从池中分配一个并固定；空 = 全部 14 个中文音色（默认）；只 1 个 = 全会话一种声音 |
 | rate | +0% | 语速（edge-tts），滑杆 -50% ~ +50% |
 | pitch | +0Hz | 音调（edge-tts），滑杆 -50Hz ~ +50Hz |
 | announceCompleted | true | 对话正常结束时播报 |
 | announceError | true | 出错、中止、截断时播报 |
 | announceSubagent | false | 是否播报子代理会话 |
 | liveRead | true | 实时朗读：回复按句边出边念（仅 edge-tts） |
-| liveReadActiveOnly | true | 只朗读当前活动会话（浏览器自动上报） |
+| liveReadActiveOnly | false | 只朗读当前活动会话（浏览器自动上报） |
+| overlapLive | true | 多会话重叠朗读：默认开启 = 不同音色的会话可同时朗读（同会话仍串行）；关闭 = 全局单队列，同一时间只念一个会话 |
 | liveReadMaxQueue | 5 | 跟读跳跃：待念队列超过此句数时丢弃旧文本、跳到最新内容 |
 
-## 音色（edge-tts，共 22 个）
+## 音色（edge-tts，14 个中文音色）
 
-| 语言 | 音色 |
+全部为中文音色（普通话 / 方言 / 粤语 / 台湾）——edge-tts 每个音色都能朗读英文，中英混合内容照常。
+
+| 分组 | 音色 |
 | --- | --- |
-| 中文 | 晓晓 / 晓伊 / 云希 / 云扬 / 云健（zh-CN-*Neural） |
-| 方言 | 晓北（辽宁）、晓妮（陕西） |
-| 粤语 | 曉曼（zh-HK-HiuMaanNeural） |
-| 台语 | 曉臻（zh-TW-HsiaoChenNeural） |
-| 英语 | Aria / Jenny / Guy / Davis（en-US）、Sonia / Ryan（en-GB） |
-| 日语 | Nanami / Keita（ja-JP） |
-| 韩语 | SunHi（ko-KR） |
-| 法语 | Denise（fr-FR） |
-| 德语 | Katja（de-DE） |
-| 俄语 | Svetlana（ru-RU） |
-| 西语 | Elvira（es-ES） |
+| 普通话（zh-CN） | 晓晓 · 晓伊 · 云希 · 云扬 · 云健 · 云夏 |
+| 方言（zh-CN） | 晓北（辽宁）· 晓妮（陕西） |
+| 粤语（zh-HK） | 曉佳 · 曉曼 · 雲龍 |
+| 台湾（zh-TW） | 曉臻 · 曉雨 · 雲哲 |
 
-> 非 CJK 音色要求合成文本与音色语言一致（服务端限制），各语言试听文本已内置。
->
-> 音色选择支持**输入任意合法 edge-tts 音色 id**（内置常用音色下拉建议与试听按钮）。完整音色列表：[微软语音语言支持文档](https://learn.microsoft.com/zh-cn/azure/ai-services/speech-service/language-support?tabs=tts)。
+> **会话分配**：新会话（首次朗读时）按 `分配计数 % 音色池长度` 从勾选池中取一个音色并永久固定（持久化到 `voice-announcer-session-voices.json`）。修改筛选只影响之后的分配——已分配会话保持原音色，取模保证新会话与新列表长度自动对齐。
 
 ## 行为
 
 - 子代理会话默认不播报（可通过 `announceSubagent` 开启）
+- 每个会话固定使用分配到的音色直至会话结束；升级前已朗读过的会话保留旧单音色行为
+- 实时朗读默认多会话重叠（不同音色的会话可同时朗读，同会话仍串行）；将「多会话重叠朗读」关闭后回退全局单队列（同一时间只念一个会话）
 - 每次播报边合成边流式播放，无临时文件、无转码；ffplay 缺失时自动降级 SAPI
 - 出错时附带错误信息（截取前 60 字）；中止时区分「你中止」与「父代理中止」
 

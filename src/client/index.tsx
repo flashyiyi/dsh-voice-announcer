@@ -2,6 +2,7 @@
  * dsh-voice-announcer — client 配置卡片。
  * 注册 settings.plugin.item（key=voice-announcer）。样式复刻官方
  * ui-settings-plugins 的 PluginCard + fields（CSS 变量一致）。
+ * 音色：中文音色勾选池；新会话按勾选顺序轮转分配（host 端持久化）。
  */
 import { useEffect, useRef, useState } from 'react'
 import type { SlotsService } from '@deepseek-ai/dsh-client-ui-slots'
@@ -22,7 +23,7 @@ const NS = 'voice-announcer'
 interface VoiceAnnouncerSettings {
   enabled?: boolean
   engine?: 'edge-tts' | 'sapi'
-  voice?: string
+  voices?: string[]
   rate?: string
   pitch?: string
   announceCompleted?: boolean
@@ -34,18 +35,25 @@ interface VoiceAnnouncerSettings {
   debugLog?: boolean
 }
 
-/** edge-tts 常用音色（与「自动」并列，可试听）。 */
-const VOICES = [
-  'zh-CN-XiaoxiaoNeural', 'zh-CN-XiaoyiNeural', 'zh-CN-YunxiNeural', 'zh-CN-YunyangNeural', 'zh-CN-YunjianNeural',
-  'zh-CN-liaoning-XiaobeiNeural', 'zh-CN-shaanxi-XiaoniNeural',
-  'zh-TW-HsiaoChenNeural', 'zh-HK-HiuMaanNeural',
-  'en-US-AriaNeural', 'en-US-JennyNeural', 'en-US-GuyNeural', 'en-US-DavisNeural',
-  'en-GB-SoniaNeural', 'en-GB-RyanNeural',
-  'ja-JP-NanamiNeural', 'ja-JP-KeitaNeural',
-  'ko-KR-SunHiNeural', 'fr-FR-DeniseNeural', 'de-DE-KatjaNeural', 'ru-RU-SvetlanaNeural', 'es-ES-ElviraNeural',
+/** 内置中文音色（与 host CHINESE_VOICES 同序）：普通话 6 + 方言 2 + 粤语 3 + 台湾 3。 */
+const VOICES: { id: string; name: string; gender: string; region: string }[] = [
+  { id: 'zh-CN-XiaoxiaoNeural', name: '晓晓', gender: '女', region: '普通话' },
+  { id: 'zh-CN-XiaoyiNeural', name: '晓伊', gender: '女', region: '普通话' },
+  { id: 'zh-CN-YunxiNeural', name: '云希', gender: '男', region: '普通话' },
+  { id: 'zh-CN-YunyangNeural', name: '云扬', gender: '男', region: '普通话' },
+  { id: 'zh-CN-YunjianNeural', name: '云健', gender: '男', region: '普通话' },
+  { id: 'zh-CN-YunxiaNeural', name: '云夏', gender: '男', region: '普通话' },
+  { id: 'zh-CN-liaoning-XiaobeiNeural', name: '晓北', gender: '女', region: '东北话' },
+  { id: 'zh-CN-shaanxi-XiaoniNeural', name: '晓妮', gender: '女', region: '陕西话' },
+  { id: 'zh-HK-HiuGaaiNeural', name: '曉佳', gender: '女', region: '粤语' },
+  { id: 'zh-HK-HiuMaanNeural', name: '曉曼', gender: '女', region: '粤语' },
+  { id: 'zh-HK-WanLungNeural', name: '雲龍', gender: '男', region: '粤语' },
+  { id: 'zh-TW-HsiaoChenNeural', name: '曉臻', gender: '女', region: '台湾' },
+  { id: 'zh-TW-HsiaoYuNeural', name: '曉雨', gender: '女', region: '台湾' },
+  { id: 'zh-TW-YunJheNeural', name: '雲哲', gender: '男', region: '台湾' },
 ]
 
-type FieldType = 'bool' | 'select' | 'slider' | 'number' | 'voice'
+type FieldType = 'bool' | 'select' | 'slider' | 'number' | 'voices'
 interface FieldDef {
   key: keyof VoiceAnnouncerSettings
   label: string
@@ -56,13 +64,11 @@ interface FieldDef {
   max?: number
   step?: number
   suffix?: string
-  /** 附加在 hint 尾部的超链接（如音色完整列表）。 */
-  link?: string
 }
 const FIELDS: FieldDef[] = [
   { key: 'enabled', label: '启用播报', hint: '关闭后不再播报任何对话结束通知', type: 'bool' },
   { key: 'engine', label: '播报引擎', hint: 'edge-tts：神经网络音质，需联网与 ffplay（随 ffmpeg 安装）；sapi：Windows 本地语音，离线可用', type: 'select', options: ['edge-tts', 'sapi'] },
-  { key: 'voice', label: '音色', hint: '「自动」跟随界面语言；可下拉选常用音色，或选「自定义…」输入任意 edge-tts 音色 id 并试听', type: 'voice', options: ['auto', ...VOICES], link: 'https://learn.microsoft.com/en-us/azure/ai-services/speech-service/language-support?tabs=tts' },
+  { key: 'voices', label: '音色池', hint: '勾选可用的中文音色；每个会话按勾选顺序轮转分配一个音色并固定。不勾选 = 全部音色（默认）；只勾 1 个 = 全会话一种声音', type: 'voices' },
   { key: 'rate', label: '语速', hint: '相对正常语速的偏移（-50% ~ +50%）', type: 'slider', min: -50, max: 50, step: 5, suffix: '%' },
   { key: 'pitch', label: '音调', hint: '相对正常音调的偏移（-50Hz ~ +50Hz）', type: 'slider', min: -50, max: 50, step: 5, suffix: 'Hz' },
   { key: 'announceCompleted', label: '完成时播报', hint: '对话正常结束时播报', type: 'bool' },
@@ -70,6 +76,7 @@ const FIELDS: FieldDef[] = [
   { key: 'announceSubagent', label: '子任务也播报', hint: '子代理（subagent）会话默认不播报，开启后一并播报', type: 'bool' },
   { key: 'liveRead', label: '实时朗读', hint: '生成回复时边出边念（仅 edge-tts，逐句合成流式播放，无需等待完整回复）', type: 'bool' },
   { key: 'liveReadActiveOnly', label: '仅当前活动会话', hint: '只朗读当前正在查看的会话；关闭则所有会话的回复都实时朗读', type: 'bool' },
+  { key: 'overlapLive', label: '多会话重叠朗读', hint: '不同会话使用不同音色，可同时朗读互不打断；默认关闭 = 同一时间只念一个会话', type: 'bool' },
   { key: 'liveReadMaxQueue', label: '跳跃阈值', hint: '待念队列超过此句数时丢弃旧文本、跳到最新内容（实时朗读追不上时）', type: 'number', min: 1, max: 10, step: 1, suffix: '句' },
   { key: 'debugLog', label: '详细日志', hint: '记录实时朗读/预合成/打断等诊断日志（排查问题时开启）；关键事件始终记录', type: 'bool' },
 ]
@@ -95,7 +102,6 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
   const [previewing, setPreviewing] = useState(false)
-  const [voiceCustom, setVoiceCustom] = useState(false)
   const previewRef = useRef<HTMLAudioElement | null>(null)
   const dirtyRef = useRef(false)
   dirtyRef.current = Object.keys(draft).length > 0
@@ -114,19 +120,14 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
   /** 字段是否被用户覆盖（user 层有值，或草稿里 set）。 */
   const overridden = (field: FieldDef): boolean =>
     draft[field.key] !== undefined || (user !== undefined && field.key in user)
-  /** 音色值是否在常用列表内（否则视为自定义输入）。 */
-  const isVoiceKnown = ((): boolean => {
-    const v = String(fieldValue(FIELDS[2]) ?? '')
-    return v === '' || v === 'auto' || VOICES.includes(v)
-  })()
   /** 当前引擎（草稿优先）。 */
   const engine = String(fieldValue(FIELDS[1]) ?? 'edge-tts')
-  /** sapi 引擎：不支持 voice/rate/pitch（SAPI 用系统语音）；实时朗读仅 edge-tts。 */
+  /** sapi 引擎：不支持 voices/rate/pitch（SAPI 用系统语音）；实时朗读仅 edge-tts。 */
   const engineIsSapi = engine === 'sapi'
   const liveReadOn = fieldValue(FIELDS[8]) === true
   const fieldDisabled = (field: FieldDef): boolean => {
     if (!writable) return true
-    if (engineIsSapi && (field.key === 'voice' || field.key === 'rate' || field.key === 'pitch' || field.key === 'liveRead' || field.key === 'liveReadActiveOnly')) return true
+    if (engineIsSapi && (field.key === 'voices' || field.key === 'rate' || field.key === 'pitch' || field.key === 'liveRead' || field.key === 'liveReadActiveOnly')) return true
     if ((field.key === 'liveReadActiveOnly' || field.key === 'liveReadMaxQueue') && liveReadOn !== true) return true
     return false
   }
@@ -270,41 +271,33 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
                               : null}
                           </div>
                         )
-                      : field.type === 'voice'
+                      : field.type === 'voices'
                         ? (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                              <select
-                                value={!isVoiceKnown || voiceCustom ? '__custom__' : String(cur ?? '')}
-                                disabled={fieldDisabled(field)}
-                                onChange={(e) => {
-                                  const val = e.target.value
-                                  if (val === '__custom__') { setVoiceCustom(true); return }
-                                  setVoiceCustom(false)
-                                  stage(field.key as string, val === '' ? null : val)
-                                }}
-                                style={inputBase}>
-                                {(field.options ?? []).map(o => <option key={o} value={o}>{o}</option>)}
-                                <option value="__custom__">自定义…</option>
-                              </select>
-                              <button type="button"
-                                disabled={String(fieldValue(field) ?? '') === 'auto' || !writable || previewing}
-                                onClick={() => {
-                                  const voice = String(fieldValue(field) ?? '')
-                                  if (!voice || voice === 'auto') return
-                                  previewVoice(voice)
-                                }}
-                                style={{ appearance: 'none', border: '1px solid ' + v.border, borderRadius: 8, padding: '5px 12px', font: 'inherit', fontSize: 13, lineHeight: '1.5', cursor: 'pointer', background: 'none', color: v.label2, whiteSpace: 'nowrap' }}>
-                                {previewing ? '试听中…' : '试听'}
-                              </button>
-                            </div>
-                            {(!isVoiceKnown || voiceCustom)
-                              ? (
-                                <input placeholder="输入任意 edge-tts 音色 id，如 zh-CN-YunxiaNeural"
-                                  value={String(cur ?? '')} disabled={fieldDisabled(field)}
-                                  onChange={(e) => stage(field.key as string, e.target.value === '' ? null : e.target.value)}
-                                  style={inputBase} />
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            {VOICES.map(vo => {
+                              const arr = Array.isArray(cur) ? (cur as string[]) : []
+                              const checked = arr.includes(vo.id)
+                              return (
+                                <div key={vo.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '5px 0' }}>
+                                  <input type="checkbox" checked={checked} disabled={fieldDisabled(field)}
+                                    onChange={(e) => {
+                                      const next = e.target.checked ? [...arr, vo.id] : arr.filter(x => x !== vo.id)
+                                      stage(field.key as string, next)
+                                    }}
+                                    style={{ width: 16, height: 16, accentColor: v.brand, flex: 'none' }} />
+                                  <span style={{ flex: 'none', minWidth: 84, fontSize: 13, color: v.label1 }}>
+                                    {vo.name}<span style={{ color: v.label3, marginLeft: 4, fontSize: 12 }}>（{vo.gender}·{vo.region}）</span>
+                                  </span>
+                                  <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: v.label3, fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{vo.id}</span>
+                                  <button type="button" disabled={!writable || previewing} onClick={() => previewVoice(vo.id)}
+                                    style={{ appearance: 'none', border: '1px solid ' + v.border, borderRadius: 8, padding: '3px 10px', font: 'inherit', fontSize: 12, lineHeight: '1.5', cursor: 'pointer', background: 'none', color: v.label2, whiteSpace: 'nowrap', flex: 'none' }}>
+                                    {previewing ? '试听中…' : '试听'}
+                                  </button>
+                                </div>
                               )
+                            })}
+                            {(!Array.isArray(cur) || cur.length === 0)
+                              ? <p style={{ margin: '4px 0 0', fontSize: 12, lineHeight: '1.5', color: v.label3 }}>{'未勾选任何音色：使用全部 ' + VOICES.length + ' 个音色（默认状态）'}</p>
                               : null}
                           </div>
                         )
@@ -332,9 +325,6 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
                         )}
                     <p style={{ margin: 0, fontSize: 12, lineHeight: '1.5', color: v.label3 }}>
                       {field.hint}
-                      {field.link
-                        ? <a href={field.link} target="_blank" rel="noreferrer" style={{ color: v.brand, textDecoration: 'underline', marginLeft: 4 }}>完整音色列表 ↗</a>
-                        : null}
                     </p>
                   </div>
                 )

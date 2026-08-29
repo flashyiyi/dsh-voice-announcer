@@ -5,11 +5,12 @@
       config:
         enabled: true
         engine: edge-tts
-        voice: auto
+        voices: [] # 空 = 未筛选，使用全部中文音色
         announceCompleted: true
         announceError: true
         announceSubagent: false
         liveRead: true
-        liveReadActiveOnly: true
+        liveReadActiveOnly: false
+        overlapLive: true
         liveReadMaxQueue: 5
         debugLog: false

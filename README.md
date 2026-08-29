@@ -7,11 +7,12 @@ A voice announcement plugin for DSH (DeepSeek Harness). It listens for each sess
 ## Features
 
 - **Clear announcements** — `Session title: Round N ended`, with dedicated copy for errors, aborts, truncation, and interruptions
-- **8-language support** — announcement copy switches automatically based on the voice language (Chinese, English, Japanese, Korean, French, German, Russian, Spanish), falling back to Chinese
+- **Per-session voices** — each session is assigned a Chinese voice from your checked pool (all 14 by default), rotating by index so new sessions differ; the assignment is fixed and persists across restarts
+- **Voice filtering** — check any subset of the 14 Chinese voices in the settings UI; checking one voice means every session uses that single voice
 - **Subagent control** — subagent sessions are silent by default; enable them with one toggle
 - **Live reading** — while a reply streams in, sentences are spoken as they complete (edge-tts, sentence-buffered, pre-synthesized for gapless playback); optionally restrict to the currently active session only, with catch-up jumping when the reading falls behind
 - **Web settings UI** — configure everything in Settings → Plugin configuration; changes apply live, no config-file editing
-- **Voice preview** — a "Preview" button next to the voice picker synthesizes a sample using the current rate and pitch
+- **Voice preview** — every voice row has a "Preview" button that synthesizes a sample with the current rate and pitch
 - **Two engines** — edge-tts (neural voices, requires network) or sapi (offline Windows voices)
 - **Streaming playback** — audio plays as it is synthesized (no temp files, no conversion); the first syllable arrives within ~0.6s
 - **Concurrency-safe** — each announcement is independent; concurrent sessions never drop or interfere with announcements
@@ -45,12 +46,13 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
   config:
     enabled: true
     engine: edge-tts        # edge-tts / sapi
-    voice: auto              # auto: follow UI language; or a specific voice id
+    voices: []               # [] = all Chinese voices (default); or a list, e.g. [zh-CN-XiaoxiaoNeural, zh-CN-YunxiNeural]
+    overlapLive: true         # sessions with different voices read aloud simultaneously (default); set false for a single global queue
     announceCompleted: true
     announceError: true
     announceSubagent: false  # announce subagent sessions too
     liveRead: true           # live-read replies as they stream in (edge-tts only)
-    liveReadActiveOnly: true # live-read only the currently active session
+    liveReadActiveOnly: false # live-read only the currently active session
     liveReadMaxQueue: 5      # catch-up jump threshold (pending sentences)
 ```
 
@@ -60,39 +62,35 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 | --- | --- | --- |
 | enabled | true | Master switch |
 | engine | edge-tts | Engine; voice/rate/pitch controls are disabled when sapi is selected |
-| voice | auto | Voice id (edge-tts only), see below; `auto` picks by UI language (zh→Xiaoxiao, en→Aria) when unset |
+| voices | [] | Voice pool (edge-tts Chinese voices). New sessions pick one by round-robin index from this pool and keep it. Empty = all 14 Chinese voices (default); one entry = every session uses that single voice |
 | rate | +0% | Speech rate (edge-tts), slider -50% ~ +50% |
 | pitch | +0Hz | Speech pitch (edge-tts), slider -50Hz ~ +50Hz |
 | announceCompleted | true | Announce normal completion |
 | announceError | true | Announce errors, aborts, and truncations |
 | announceSubagent | false | Announce subagent sessions too |
 | liveRead | true | Live-read replies sentence by sentence while they stream (edge-tts only) |
-| liveReadActiveOnly | true | Live-read only the currently active session (the browser reports it) |
+| liveReadActiveOnly | false | Live-read only the currently active session (the browser reports it) |
+| overlapLive | true | Overlap live-reading across sessions: on (default) = sessions with different voices can speak simultaneously (same session still serial); off = one session speaks at a time (global queue) |
 | liveReadMaxQueue | 5 | Catch-up jump: when the pending queue exceeds this many sentences, drop the stale ones and jump to the latest content |
 
-## Voices (edge-tts, 22)
+## Voices (edge-tts, 14 Chinese voices)
 
-| Language | Voices |
+All voices are Chinese (Mandarin / dialects / Cantonese / Taiwanese) — every edge-tts voice can also read English text, so mixed content works.
+
+| Group | Voices |
 | --- | --- |
-| Chinese | Xiaoxiao / Xiaoyi / Yunxi / Yunyang / Yunjian (zh-CN-*Neural) |
-| Dialects | Xiaobei (Liaoning), Xiaoni (Shaanxi) |
-| Cantonese | HiuMaan (zh-HK) |
-| Taiwanese | HsiaoChen (zh-TW) |
-| English | Aria / Jenny / Guy / Davis (en-US), Sonia / Ryan (en-GB) |
-| Japanese | Nanami / Keita (ja-JP) |
-| Korean | SunHi (ko-KR) |
-| French | Denise (fr-FR) |
-| German | Katja (de-DE) |
-| Russian | Svetlana (ru-RU) |
-| Spanish | Elvira (es-ES) |
+| Mandarin (zh-CN) | Xiaoxiao · Xiaoyi · Yunxi · Yunyang · Yunjian · Yunxia |
+| Dialects (zh-CN) | Xiaobei (Liaoning) · Xiaoni (Shaanxi) |
+| Cantonese (zh-HK) | HiuGaai · HiuMaan · WanLung |
+| Taiwanese (zh-TW) | HsiaoChen · HsiaoYu · YunJhe |
 
-> Non-CJK voices require the text to be in the matching language (server-side requirement); per-language preview texts are built in.
->
-> The voice picker also accepts **any valid edge-tts voice id** by typing it (with a built-in list of common voices and a preview button). Full list: [Microsoft speech language support](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/language-support?tabs=tts).
+> **Per-session assignment**: a new session (the first time it is read aloud) is assigned the voice at index `allocationCount % voices.length` of your checked pool, then keeps it permanently (persisted to `voice-announcer-session-voices.json`). Changing the filter only affects future assignments — existing sessions keep their voice, and the modulo keeps new sessions aligned to the new list length.
 
 ## Behavior
 
 - Subagent sessions are not announced by default (enable via `announceSubagent`)
+- Each session keeps its assigned voice until the session ends; a session that already spoke before an upgrade keeps its previous single-voice behavior
+- Live reading overlaps across sessions by default — sessions with different voices can read aloud simultaneously (same session stays serial). Set **overlapLive** to false to fall back to a single global queue (one session speaks at a time)
 - Each announcement is synthesized and streamed straight to the player — no temp files, no conversion; if ffplay is missing it falls back to SAPI
 - Error messages are included (truncated to 60 characters); aborts distinguish "by you" from "by the parent agent"
 
