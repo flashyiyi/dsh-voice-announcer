@@ -103,6 +103,10 @@ DSH_CHECKOUT=<你的dsh-harness路径> bash scripts/build.sh
 npx tsdown
 ```
 
+## 更新记录
+
+- **0.1.7** — 性能修复：会话标题读取不再走 `sessionProjections.snapshot()`——该调用会对超大会话（百万级事件 × 每个注册投影 key）同步做全量 fold，曾导致 DSH 服务端定期完全卡住（冻结数秒到分钟级后自动恢复）。现在改为轻量反向扫描最近的 `session/title` 事件取标题，播报标题不再触发全量投影。
+
 ## License
 
 BSD-3-Clause

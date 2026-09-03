@@ -103,6 +103,10 @@ DSH_CHECKOUT=<path-to-dsh-harness> bash scripts/build.sh
 npx tsdown
 ```
 
+## Changelog
+
+- **0.1.7** — Performance fix: the session-title lookup no longer calls `sessionProjections.snapshot()`, which synchronously folds the entire event log of a huge session (millions of events × every registered projection key) and can freeze the DSH web server for seconds to minutes. Titles are now read with a lightweight reverse scan for the latest `session/title` event.
+
 ## License
 
 BSD-3-Clause

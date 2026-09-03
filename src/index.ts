@@ -86,32 +86,21 @@ function stripMd(s: string): string {
 }
 
 /**
- * 标题优先从 sessionProjections 投影读取（官方全量 fold，不扫事件不卡）；
- * 投影不可用时回退扫日志尾部 200 条找 session/title 事件。
+ * 标题读取：直接从事件流反向找最近的 session/title 事件（单遍，只比 type）。
+ * 禁止走 sessionProjections.snapshot()：snapshot 对未建 cell 的会话会同步 fold
+ * 全部历史事件（百万级 × 每个注册投影 key），事件循环冻结数秒到分钟级，
+ * 曾导致 DSH 服务端定期完全卡住（2026-09 修复，见 voice-announcer.log）。
  */
 const DIAG_LOG = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'voice-announcer.log')
 function diag(msg: string): void {
   try { appendFileSync(DIAG_LOG, '[' + new Date().toISOString() + '] [diag] ' + msg + '\n') } catch {}
 }
 
-function findTitle(session: any, ctx?: AppContext): string {
-  try {
-    // 投影读取面：snapshot(session).values.title（session-title 注册的 title 投影）
-    const proj = ctx?.sessionProjections
-    if (proj && typeof proj.snapshot === 'function') {
-      const snap = proj.snapshot(session)
-      const title = snap?.values?.title
-      diag('投影: title=' + JSON.stringify(title) + ' keys=' + JSON.stringify(snap ? Object.keys(snap.values ?? {}) : null) + ' asOfSeq=' + String(snap?.asOfSeq) + ' events=' + String(session?.events?.length ?? '?'))
-      if (typeof title === 'string' && title.trim()) return cleanText(title)
-    } else {
-      diag('无sessionProjections服务: ' + String(!!proj) + ' typeof=' + typeof (ctx as any)?.sessionProjections)
-    }
-  } catch (e) { diag('投影读取异常: ' + (e instanceof Error ? e.message : String(e))) }
+function findTitle(session: any): string {
   try {
     const events = session?.events
     if (!Array.isArray(events)) return ''
-    const start = Math.max(0, events.length - 200)
-    for (let i = events.length - 1; i >= start; i -= 1) {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
       const ev = events[i]
       if (ev?.type === 'session/title' && typeof ev.data?.title === 'string' && ev.data.title.trim()) {
         return cleanText(ev.data.title)
@@ -243,7 +232,7 @@ function summarize(session: any, event: any, ctx?: AppContext, voice?: string): 
   try {
     const reason = event?.data?.reason
     const kind = String(reason?.kind ?? 'completed')
-    const title = findTitle(session, ctx)
+    const title = findTitle(session)
     const t = langPack(voice ?? '')
     // 轮数：turn/end 事件自带；有则播报"第 N 轮"
     const turn = typeof event?.data?.turn === 'number' ? event.data.turn : undefined
