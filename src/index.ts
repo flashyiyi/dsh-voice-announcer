@@ -29,6 +29,8 @@ export interface Config {
   announceError?: boolean
   /** 子代理（subagent）会话也播报；默认 false（只播主会话） */
   announceSubagent?: boolean
+  /** 会话挂起等用户回应时播报（提问 ask_user_question / 计划审阅 exit_plan_mode / 审批提权 approval/asked）；默认开启 */
+  announceWait?: boolean
   /** 实时朗读：回复生成过程中边出边念（仅 edge-tts 引擎，逐句合成流式播放）；默认关闭 */
   liveRead?: boolean
   /** 实时朗读只读当前活动会话（前端上报活动会话 id）；默认开启 */
@@ -62,6 +64,7 @@ const DEFAULTS: ConfigType = {
   announceCompleted: true,
   announceError: true,
   announceSubagent: false,
+  announceWait: true,
   liveRead: true,
   liveReadActiveOnly: false,
   overlapLive: true,
@@ -123,6 +126,9 @@ const LANG_TEXTS: Record<string, Record<string, string>> = {
     roundN: '第 {n} 轮',
     byUser: '{round}对话被你中止了',
     byParent: '{round}对话被父代理中止了',
+    askText: '在问你：{q}',
+    planText: '计划写好了，在等你审阅',
+    approveText: '在等你批准：{d}',
   },
   en: {
     completed: '{round} of conversation has ended',
@@ -135,6 +141,9 @@ const LANG_TEXTS: Record<string, Record<string, string>> = {
     roundN: 'Round {n}',
     byUser: '{round} was aborted by you',
     byParent: '{round} was aborted by the parent agent',
+    askText: 'is asking you: {q}',
+    planText: 'has a plan waiting for your review',
+    approveText: 'is requesting your approval: {d}',
   },
   ja: {
     completed: '{round}の会話は終了しました',
@@ -147,6 +156,9 @@ const LANG_TEXTS: Record<string, Record<string, string>> = {
     roundN: '第 {n} 回',
     byUser: '{round}の会話はあなたが中止しました',
     byParent: '{round}の会話は親エージェントが中止しました',
+    askText: 'あなたに質問しています：{q}',
+    planText: 'プランの確認を待っています',
+    approveText: '承認を求めています：{d}',
   },
   ko: {
     completed: '{round} 대화가 종료되었습니다',
@@ -159,6 +171,9 @@ const LANG_TEXTS: Record<string, Record<string, string>> = {
     roundN: '{n}번째',
     byUser: '{round} 대화를 중단했습니다',
     byParent: '{round} 대화가 상위 에이전트에 의해 중단되었습니다',
+    askText: '질문을 기다립니다：{q}',
+    planText: '계획 검토를 기다립니다',
+    approveText: '승인을 요청합니다：{d}',
   },
   fr: {
     completed: '{round} : Cette conversation est terminée',
@@ -171,6 +186,9 @@ const LANG_TEXTS: Record<string, Record<string, string>> = {
     roundN: 'Tour {n}',
     byUser: '{round} a été interrompu par vous',
     byParent: '{round} a été interrompu par l\'agent parent',
+    askText: 'vous pose une question : {q}',
+    planText: 'attend votre validation du plan',
+    approveText: 'demande votre approbation : {d}',
   },
   de: {
     completed: '{round} : Diese Unterhaltung ist beendet',
@@ -183,6 +201,9 @@ const LANG_TEXTS: Record<string, Record<string, string>> = {
     roundN: 'Runde {n}',
     byUser: '{round} wurde von Ihnen abgebrochen',
     byParent: '{round} wurde vom übergeordneten Agenten abgebrochen',
+    askText: 'fragt Sie: {q}',
+    planText: 'wartet auf Ihre Planprüfung',
+    approveText: 'bittet um Ihre Genehmigung: {d}',
   },
   ru: {
     completed: '{round} : Этот разговор завершён',
@@ -195,6 +216,9 @@ const LANG_TEXTS: Record<string, Record<string, string>> = {
     roundN: 'Раунд {n}',
     byUser: '{round} был прерван вами',
     byParent: '{round} был прерван родительским агентом',
+    askText: 'задаёт вам вопрос: {q}',
+    planText: 'ждёт вашего утверждения плана',
+    approveText: 'запрашивает ваше разрешение: {d}',
   },
   es: {
     completed: '{round} : Esta conversación ha terminado',
@@ -207,6 +231,9 @@ const LANG_TEXTS: Record<string, Record<string, string>> = {
     roundN: 'Ronda {n}',
     byUser: '{round} fue interrumpido por usted',
     byParent: '{round} fue interrumpido por el agente principal',
+    askText: 'te pregunta: {q}',
+    planText: 'espera tu revisión del plan',
+    approveText: 'solicita tu aprobación: {d}',
   },
 }
 
@@ -331,6 +358,7 @@ const VoiceAnnouncerSettings = z.object({
   announceCompleted: z.boolean().default(DEFAULTS.announceCompleted),
   announceError: z.boolean().default(DEFAULTS.announceError),
   announceSubagent: z.boolean().default(DEFAULTS.announceSubagent),
+  announceWait: z.boolean().default(DEFAULTS.announceWait),
   liveRead: z.boolean().default(DEFAULTS.liveRead),
   liveReadActiveOnly: z.boolean().default(DEFAULTS.liveReadActiveOnly),
   overlapLive: z.boolean().default(DEFAULTS.overlapLive),
@@ -620,6 +648,31 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     ensurePreSynth(log2)
     pumpLive(log2)
   }
+
+  // 会话挂起等用户回应（提问/计划审阅/审批提权）的提示播报：
+  // 与 turn/end 总结同一通道——先掐掉实时朗读尾巴，念完恢复 live 队列。
+  function speakWaitPrompt(session: any, kind: 'ask' | 'plan' | 'approve', detail: string, log2: (m: string) => void): void {
+    if (!cfg.enabled || !cfg.announceWait) return
+    if (session?.header?.origin === 'subagent' && !cfg.announceSubagent) return
+    const vVoice = resolveVoiceFor(String(session?.id ?? ''), log2)
+    const t = langPack(vVoice)
+    const body = kind === 'ask'
+      ? String(t.askText).replace('{q}', detail || '')
+      : kind === 'plan' ? t.planText : String(t.approveText).replace('{d}', detail || '')
+    const title = findTitle(session)
+    const text = (title ? title + '：' : '') + body
+    stopLiveRead(log2)
+    log2('等待播报 kind=' + kind + ' 音色=' + vVoice + ' 文本=' + text.slice(0, 40))
+    if (cfg.engine === 'sapi') {
+      speakSapi(text, log2)
+    } else {
+      summaryPlaying = true
+      speakEdgeTts(text, { voice: vVoice, rate: cfg.rate, pitch: cfg.pitch }, log2, instId, () => {
+        summaryPlaying = false
+        pumpLive(log2)
+      })
+    }
+  }
   // 缓冲超时强制切句：模型输出停顿（>2s 无新 chunk）时，把未到边界的缓冲也念掉，
   // 避免工具执行/思考期间残留文本长时间不念（表现为「实时朗读没有了」）
   const flushTimer = setInterval(() => {
@@ -756,6 +809,38 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       }
       // 用户发消息：完全不打断实时朗读（只有结束通知语音才打断）
       if (type === 'user/message') return
+      // 会话挂起等用户回应：提问（ask_user_question）/ 计划审阅（exit_plan_mode）→ tool/call 事件
+      if (type === 'tool/call') {
+        const toolName = String(event?.data?.name ?? '')
+        if (toolName !== 'ask_user_question' && toolName !== 'exit_plan_mode') return
+        let detail = ''
+        if (toolName === 'ask_user_question') {
+          try {
+            const args = JSON.parse(String(event?.data?.arguments ?? '{}'))
+            const q = args?.questions?.[0]?.question
+            if (typeof q === 'string' && q) detail = cleanText(q).slice(0, 60)
+          } catch { /* 参数解析失败则只播提示 */ }
+        }
+        log('实例 ' + instId + ' 收到等待事件 tool=' + toolName)
+        speakWaitPrompt(session, toolName === 'ask_user_question' ? 'ask' : 'plan', detail, log)
+        return
+      }
+      // 审批/提权请求（approval/asked 审计事件；toolName+reason 即请求内容）。
+      // 先折叠会话审批策略：never = 自动拒绝、未真正等待用户，跳过
+      if (type === 'approval/asked') {
+        const evs = session?.events ?? []
+        let pol = 'ask'
+        for (let i = evs.length - 1; i >= 0; i -= 1) {
+          const e = evs[i]
+          if (e?.type === 'approval/policy') { pol = String(e?.data?.policy ?? 'ask'); break }
+        }
+        if (pol === 'never') return
+        const d = event?.data
+        const detail = cleanText(String(d?.reason ?? '')).slice(0, 60) || String(d?.toolName ?? '')
+        log('实例 ' + instId + ' 收到等待事件 approval/asked tool=' + String(d?.toolName ?? ''))
+        speakWaitPrompt(session, 'approve', detail, log)
+        return
+      }
       if (type !== 'turn/end') return;
       log('实例 ' + instId + ' 收到 turn/end turn=' + String(event?.data?.turn ?? '?'))
       if (!cfg.enabled) return;

@@ -51,6 +51,7 @@ dsh plugin --profile web add dsh-voice-announcer
     announceCompleted: true
     announceError: true
     announceSubagent: false  # 是否播报子代理会话
+    announceWait: true       # 会话在等你时播报（提问 / 计划审阅 / 审批提权）
     liveRead: true           # 实时朗读：回复生成时边出边念（仅 edge-tts）
     liveReadActiveOnly: false # 只朗读当前活动会话
     liveReadMaxQueue: 5      # 跟读跳跃阈值（待念队列句数）
@@ -68,6 +69,7 @@ dsh plugin --profile web add dsh-voice-announcer
 | announceCompleted | true | 对话正常结束时播报 |
 | announceError | true | 出错、中止、截断时播报 |
 | announceSubagent | false | 是否播报子代理会话 |
+| announceWait | true | 会话挂起等你回应时播报：向你提问、计划待审阅、审批/提权请求 |
 | liveRead | true | 实时朗读：回复按句边出边念（仅 edge-tts） |
 | liveReadActiveOnly | false | 只朗读当前活动会话（浏览器自动上报） |
 | overlapLive | true | 多会话重叠朗读：默认开启 = 不同音色的会话可同时朗读（同会话仍串行）；关闭 = 全局单队列，同一时间只念一个会话 |
@@ -92,6 +94,7 @@ dsh plugin --profile web add dsh-voice-announcer
 - 每个会话固定使用分配到的音色直至会话结束；升级前已朗读过的会话保留旧单音色行为
 - 实时朗读默认多会话重叠（不同音色的会话可同时朗读，同会话仍串行）；将「多会话重叠朗读」关闭后回退全局单队列（同一时间只念一个会话）
 - 每次播报边合成边流式播放，无临时文件、无转码；ffplay 缺失时自动降级 SAPI
+- 会话挂起等你回应时（向你提问 / 计划待审阅 / 审批提权请求）会用该会话音色播报一句提示，只打断该会话的实时朗读（`announceWait` 控制）
 - 出错时附带错误信息（截取前 60 字）；中止时区分「你中止」与「父代理中止」
 
 ## 开发

@@ -51,6 +51,7 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
     announceCompleted: true
     announceError: true
     announceSubagent: false  # announce subagent sessions too
+    announceWait: true       # speak when a session waits for you (question / plan review / approval request)
     liveRead: true           # live-read replies as they stream in (edge-tts only)
     liveReadActiveOnly: false # live-read only the currently active session
     liveReadMaxQueue: 5      # catch-up jump threshold (pending sentences)
@@ -68,6 +69,7 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 | announceCompleted | true | Announce normal completion |
 | announceError | true | Announce errors, aborts, and truncations |
 | announceSubagent | false | Announce subagent sessions too |
+| announceWait | true | Speak when a session pauses waiting for you: it asks a question, presents a plan for review, or requests approval |
 | liveRead | true | Live-read replies sentence by sentence while they stream (edge-tts only) |
 | liveReadActiveOnly | false | Live-read only the currently active session (the browser reports it) |
 | overlapLive | true | Overlap live-reading across sessions: on (default) = sessions with different voices can speak simultaneously (same session still serial); off = one session speaks at a time (global queue) |
@@ -92,6 +94,7 @@ All voices are Chinese (Mandarin / dialects / Cantonese / Taiwanese) — every e
 - Each session keeps its assigned voice until the session ends; a session that already spoke before an upgrade keeps its previous single-voice behavior
 - Live reading overlaps across sessions by default — sessions with different voices can read aloud simultaneously (same session stays serial). Set **overlapLive** to false to fall back to a single global queue (one session speaks at a time)
 - Each announcement is synthesized and streamed straight to the player — no temp files, no conversion; if ffplay is missing it falls back to SAPI
+- When a session pauses waiting for you — it asks a question, presents a plan for review, or requests approval — a prompt is spoken with that session's voice, interrupting only that session's live reading (control via `announceWait`)
 - Error messages are included (truncated to 60 characters); aborts distinguish "by you" from "by the parent agent"
 
 ## Development

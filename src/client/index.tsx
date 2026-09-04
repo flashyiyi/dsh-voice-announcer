@@ -29,6 +29,7 @@ interface VoiceAnnouncerSettings {
   announceCompleted?: boolean
   announceError?: boolean
   announceSubagent?: boolean
+  announceWait?: boolean
   liveRead?: boolean
   liveReadActiveOnly?: boolean
   liveReadMaxQueue?: number
@@ -74,6 +75,7 @@ const FIELDS: FieldDef[] = [
   { key: 'announceCompleted', label: '完成时播报', hint: '对话正常结束时播报', type: 'bool' },
   { key: 'announceError', label: '出错时播报', hint: '出错、中止、截断等异常结束时播报', type: 'bool' },
   { key: 'announceSubagent', label: '子任务也播报', hint: '子代理（subagent）会话默认不播报，开启后一并播报', type: 'bool' },
+  { key: 'announceWait', label: '等待回应时播报', hint: '会话在等你时语音提醒：向你提问、计划待审阅、审批/提权请求', type: 'bool' },
   { key: 'liveRead', label: '实时朗读', hint: '生成回复时边出边念（仅 edge-tts，逐句合成流式播放，无需等待完整回复）', type: 'bool' },
   { key: 'liveReadActiveOnly', label: '仅当前活动会话', hint: '只朗读当前正在查看的会话；关闭则所有会话的回复都实时朗读', type: 'bool' },
   { key: 'overlapLive', label: '多会话重叠朗读', hint: '不同会话使用不同音色，可同时朗读互不打断；默认关闭 = 同一时间只念一个会话', type: 'bool' },

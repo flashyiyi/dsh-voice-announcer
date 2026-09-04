@@ -9,6 +9,7 @@
         announceCompleted: true
         announceError: true
         announceSubagent: false
+        announceWait: true
         liveRead: true
         liveReadActiveOnly: false
         overlapLive: true
