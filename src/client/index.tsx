@@ -6,8 +6,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import type { SlotsService } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
-import type { SettingsScopeBinder } from '@deepseek-ai/dsh-client-ui-settings'
+import type { SettingsScope, SettingsScopeBinder } from '@deepseek-ai/dsh-client-ui-settings'
 
 type ClientContext = {
   slots: SlotsService

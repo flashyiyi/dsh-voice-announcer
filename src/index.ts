@@ -4,7 +4,7 @@
  * 零第三方依赖：edge-tts 协议内置（自研 WebSocket 客户端），播放走 ffplay 流式 stdin。
  */
 import type { Context } from 'cordis'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -368,24 +368,26 @@ const VoiceAnnouncerSettings = z.object({
 
 /** 接入 settings：有服务则 Web 设置页可改（live 生效），无服务则 entry 配置照常。 */
 function installVoiceSettings(ctx: AppContext, cfg: ConfigType, entry: Partial<ConfigType>, log: (m: string) => void): void {
-  let source: () => ConfigType = () => ({ ...DEFAULTS, ...entry } as ConfigType)
-  installSettingsSection(ctx, settingsNamespace('voice-announcer'), VoiceAnnouncerSettings, { ...DEFAULTS, ...entry }, {
-    setSource: (current) => {
-      source = current as () => ConfigType
-      // 立即生效一次：设置文档已保存的用户配置（如 voices）启动即同步进 cfg，
-      // 避免 settings onChange 生效前（apply 后的一瞬）用 DEFAULTS/patch 配置分配音色
-      try {
-        const cur = source()
-        if (cur && typeof cur === 'object') Object.assign(cfg, cur)
-        if (!Array.isArray(cfg.voices)) cfg.voices = []
-      } catch { /* 忽略 */ }
-    },
-    onChange: () => {
-      Object.assign(cfg, source())
-      // 音色池非数组时兜底为空（= 全部音色）
+  // 把当前解析值合并进 cfg；音色池非数组时兜底为空（= 全部音色）
+  const sync = (source: () => ConfigType): void => {
+    try {
+      const cur = source()
+      if (cur && typeof cur === 'object') Object.assign(cfg, cur)
       if (!Array.isArray(cfg.voices)) cfg.voices = []
+    } catch { /* 设置读取失败时保持 entry 配置 */ }
+  }
+  ctx.inject(['settings'], (settingsCtx) => {
+    const scope: SettingsScope<ConfigType> = settingsCtx.settings.register('voice-announcer', VoiceAnnouncerSettings, {
+      base: { ...DEFAULTS, ...entry },
+    })
+    const source = (): ConfigType => scope.get()
+    // 立即生效一次：设置文档已保存的用户配置（如 voices）启动即同步进 cfg，
+    // 避免 watch 生效前（apply 后的一瞬）用 DEFAULTS/patch 配置分配音色
+    sync(source)
+    scope.watch(() => {
+      sync(source)
       log('设置已更新（即时生效）: engine=' + cfg.engine + ' 音色池=' + (cfg.voices.length === 0 ? '全部(' + CHINESE_VOICES.length + ')' : cfg.voices.length + ' 个') + ' enabled=' + cfg.enabled)
-    },
+    })
   })
 }
 
