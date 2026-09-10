@@ -89,7 +89,9 @@ function stripMd(s: string): string {
 }
 
 /**
- * 标题读取：直接从事件流反向找最近的 session/title 事件（单遍，只比 type）。
+ * 标题读取：会话日志尾部反向查找最近的 session/title 事件，找到即停。
+ * 新版 Session 没有 `events` 属性（改 `seq` + `eventAt(seq)` O(1) 读取），旧版是 events 数组——
+ * 两者都支持；配合 firehose 的 session/title 实时缓存，播报路径通常零扫描。
  * 禁止走 sessionProjections.snapshot()：snapshot 对未建 cell 的会话会同步 fold
  * 全部历史事件（百万级 × 每个注册投影 key），事件循环冻结数秒到分钟级，
  * 曾导致 DSH 服务端定期完全卡住（2026-09 修复，见 voice-announcer.log）。
@@ -99,18 +101,48 @@ function diag(msg: string): void {
   try { appendFileSync(DIAG_LOG, '[' + new Date().toISOString() + '] [diag] ' + msg + '\n') } catch {}
 }
 
-function findTitle(session: any): string {
+/** 从会话日志尾部反向找最近的匹配事件（新版 seq+eventAt；旧版 events 数组）。 */
+function findLastEvent(session: any, match: (ev: any) => boolean): any {
   try {
+    const total = session?.seq
+    if (typeof session?.eventAt === 'function' && typeof total === 'number' && total > 0) {
+      for (let i = total - 1; i >= 0; i -= 1) {
+        const ev = session.eventAt(i)
+        if (match(ev)) return ev
+      }
+      return undefined
+    }
     const events = session?.events
-    if (!Array.isArray(events)) return ''
-    for (let i = events.length - 1; i >= 0; i -= 1) {
-      const ev = events[i]
-      if (ev?.type === 'session/title' && typeof ev.data?.title === 'string' && ev.data.title.trim()) {
-        return cleanText(ev.data.title)
+    if (Array.isArray(events)) {
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        if (match(events[i])) return events[i]
       }
     }
-  } catch { /* 兜底 */ }
-  return ''
+  } catch { /* 读取失败按无匹配处理 */ }
+  return undefined
+}
+
+/** 会话标题缓存（firehose 的 session/title 事件实时写入；LRU 上限 200 条防泄漏）。 */
+const TITLE_CACHE_MAX = 200
+const titleCache = new Map<string, string>()
+function rememberTitle(sessionId: string, title: string): void {
+  if (!sessionId || !title) return
+  titleCache.delete(sessionId)
+  titleCache.set(sessionId, title)
+  if (titleCache.size > TITLE_CACHE_MAX) {
+    const oldest = titleCache.keys().next().value
+    if (oldest !== undefined) titleCache.delete(oldest)
+  }
+}
+
+function findTitle(session: any): string {
+  const sid = String(session?.id ?? '')
+  const cached = sid ? titleCache.get(sid) : undefined
+  if (cached) return cached
+  const ev = findLastEvent(session, e => e?.type === 'session/title' && typeof e.data?.title === 'string' && !!e.data.title.trim())
+  const title = ev ? cleanText(String(ev.data.title)) : ''
+  if (title) rememberTitle(sid, title)
+  return title
 }
 
 /** 多语言文案包：key = 音色语言前缀（zh/en/ja/ko/fr/de/ru/es），zh 为默认。 */
@@ -779,6 +811,12 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   (ctx.on as any)('session/event', (session: any, event: any) => {
     try {
       const type = event?.type
+      // 会话标题：实时记入缓存（播报取标题走 O(1) 缓存，避免回扫大会话日志）
+      if (type === 'session/title') {
+        const t = typeof event?.data?.title === 'string' ? cleanText(event.data.title) : ''
+        if (t) rememberTitle(String(session?.id ?? ''), t)
+        return
+      }
       // 实时朗读：assistant/chunk 的 text-delta 增量 → 句子缓冲 → 流式播放（仅 edge-tts）
       if (type === 'assistant/chunk' && cfg.enabled && cfg.liveRead && cfg.engine === 'edge-tts') {
         const chunk = event?.data?.chunk
@@ -830,12 +868,8 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       // 审批/提权请求（approval/asked 审计事件；toolName+reason 即请求内容）。
       // 先折叠会话审批策略：never = 自动拒绝、未真正等待用户，跳过
       if (type === 'approval/asked') {
-        const evs = session?.events ?? []
-        let pol = 'ask'
-        for (let i = evs.length - 1; i >= 0; i -= 1) {
-          const e = evs[i]
-          if (e?.type === 'approval/policy') { pol = String(e?.data?.policy ?? 'ask'); break }
-        }
+        const polEv = findLastEvent(session, e => e?.type === 'approval/policy')
+        const pol = polEv ? String(polEv.data?.policy ?? 'ask') : 'ask'
         if (pol === 'never') return
         const d = event?.data
         const detail = cleanText(String(d?.reason ?? '')).slice(0, 60) || String(d?.toolName ?? '')
