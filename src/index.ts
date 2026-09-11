@@ -497,6 +497,8 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   /** 正在播放的实时朗读 kill 句柄集合（重叠模式可能多个并存）；stopLiveRead 逐个掐断 */
   const liveStops = new Set<() => void>()
   let summaryPlaying = false
+  /** 新版 DSH 走 llm/stream 通道朗读后置位；旧版才回退 session/event 的 assistant/chunk（避免双通道重复念） */
+  let sawStreamChannel = false
   // 预合成流水线：当前句播放时后台合成队首下一句（Buffer 缓冲队列，最多 2 句），
   // 播完无缝衔接；2 句缓冲抗单次合成慢/失败，偶发网络抖动不露间隔
   let preSynth: Promise<void> | null = null
@@ -721,6 +723,38 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       pumpLive(log)
     }
   }, 1000)
+
+  /** 包装下游模型流：边原样转发 chunk，边把 text-delta 喂给实时朗读（只读观察，不改流内容与顺序）。 */
+  async function* teeLiveStream(source: AsyncIterable<any>, sid: string): AsyncIterable<any> {
+    for await (const chunk of source) {
+      try {
+        if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text) {
+          feedLive(chunk.text, sid, log)
+        }
+      } catch { /* 朗读失败不影响模型流 */ }
+      yield chunk
+    }
+  }
+
+  // 实时朗读（新版 DSH）：assistant/chunk 事件已从 session 日志移除，流式文本改经 llm/stream
+  // waterfall 传递（GenerateOptions.sessionId 标识会话）。包装下游流即可边出边念；
+  // 压缩/标题生成等内部请求（purpose）与子代理会话按既有规则跳过。
+  ;(ctx.on as any)('llm/stream', (options: any, next: any) => {
+    const stream = next()
+    try {
+      if (!cfg.enabled || !cfg.liveRead || cfg.engine !== 'edge-tts') return stream
+      const sid = String(options?.sessionId ?? '')
+      if (!sid) return stream
+      if (options?.purpose === 'compaction' || options?.purpose === 'session-title') return stream
+      const session = (ctx as any).sessions?.get?.(sid)
+      if (!session) return stream
+      if (session?.header?.origin === 'subagent' && !cfg.announceSubagent) return stream
+      if (cfg.liveReadActiveOnly && activeSessionId && sid !== activeSessionId) return stream
+      sawStreamChannel = true
+      return teeLiveStream(stream, sid)
+    } catch { return stream }
+  })
+
   ;(ctx.on as any)('dispose', () => {
     clearInterval(flushTimer)
     for (const k of liveStops) { try { k() } catch { /* 忽略 */ } }
@@ -817,8 +851,9 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
         if (t) rememberTitle(String(session?.id ?? ''), t)
         return
       }
-      // 实时朗读：assistant/chunk 的 text-delta 增量 → 句子缓冲 → 流式播放（仅 edge-tts）
-      if (type === 'assistant/chunk' && cfg.enabled && cfg.liveRead && cfg.engine === 'edge-tts') {
+      // 实时朗读（旧版 DSH）：assistant/chunk 的 text-delta 增量 → 句子缓冲 → 流式播放（仅 edge-tts）。
+      // 新版该事件已移除、流式改走 llm/stream（见下方监听）；此处仅在未观察到新通道时生效，避免重复念。
+      if (type === 'assistant/chunk' && !sawStreamChannel && cfg.enabled && cfg.liveRead && cfg.engine === 'edge-tts') {
         const chunk = event?.data?.chunk
         if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text) {
           // 子代理会话：遵循 announceSubagent
