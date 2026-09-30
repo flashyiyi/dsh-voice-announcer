@@ -4,7 +4,6 @@
  * 零第三方依赖：edge-tts 协议内置（自研 WebSocket 客户端），播放走 ffplay 流式 stdin。
  */
 import type { Context } from 'cordis'
-import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -44,6 +43,25 @@ export interface Config {
 }
 
 export type ConfigType = Required<Config>
+
+/** 解绑 schemastery volatile 包装（Volatile{get()}）；等价 settings 内部 plainConfig 语义。 */
+function unwrapCore(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map(unwrapCore)
+  const v = value as Record<string, unknown>
+  // Volatile 引用特征：Object.freeze({ get(), [write] })，仅一个自有键 get 且为函数
+  if (typeof v.get === 'function' && Object.keys(v).length === 1) {
+    return unwrapCore((v.get as () => unknown)())
+  }
+  const out: Record<string, unknown> = {}
+  for (const [k, c] of Object.entries(v)) out[k] = unwrapCore(c)
+  return out
+}
+function unwrapConfig<T extends object>(config: T): T {
+  if (config === null || typeof config !== 'object') return config
+  return unwrapCore(config) as T
+}
+
 
 /** 内置中文音色池（edge-tts，按轮转顺序）：普通话 6 + 方言 2 + 粤语 3 + 台湾 3。 */
 const CHINESE_VOICES = [
@@ -382,42 +400,47 @@ try { appendFileSync(BOOT_LOG, '[' + new Date().toISOString() + '] MODULE-LOAD v
 
 /** 设置命名空间 schema（与 Config 同构；schemastery 字段默认值 = DEFAULTS）。 */
 const VoiceAnnouncerSettings = z.object({
-  enabled: z.boolean().default(DEFAULTS.enabled),
-  engine: z.union(['edge-tts', 'sapi']).default(DEFAULTS.engine),
-  voices: z.array(z.string()).default(DEFAULTS.voices),
-  rate: z.string().default(DEFAULTS.rate),
-  pitch: z.string().default(DEFAULTS.pitch),
-  announceCompleted: z.boolean().default(DEFAULTS.announceCompleted),
-  announceError: z.boolean().default(DEFAULTS.announceError),
-  announceSubagent: z.boolean().default(DEFAULTS.announceSubagent),
-  announceWait: z.boolean().default(DEFAULTS.announceWait),
-  liveRead: z.boolean().default(DEFAULTS.liveRead),
-  liveReadActiveOnly: z.boolean().default(DEFAULTS.liveReadActiveOnly),
-  overlapLive: z.boolean().default(DEFAULTS.overlapLive),
-  liveReadMaxQueue: z.number().min(1).max(20).default(DEFAULTS.liveReadMaxQueue),
-  debugLog: z.boolean().default(DEFAULTS.debugLog),
+  enabled: z.boolean().default(DEFAULTS.enabled).volatile(),
+  engine: z.union(['edge-tts', 'sapi']).default(DEFAULTS.engine).volatile(),
+  voices: z.array(z.string()).default(DEFAULTS.voices).volatile(),
+  rate: z.string().default(DEFAULTS.rate).volatile(),
+  pitch: z.string().default(DEFAULTS.pitch).volatile(),
+  announceCompleted: z.boolean().default(DEFAULTS.announceCompleted).volatile(),
+  announceError: z.boolean().default(DEFAULTS.announceError).volatile(),
+  announceSubagent: z.boolean().default(DEFAULTS.announceSubagent).volatile(),
+  announceWait: z.boolean().default(DEFAULTS.announceWait).volatile(),
+  liveRead: z.boolean().default(DEFAULTS.liveRead).volatile(),
+  liveReadActiveOnly: z.boolean().default(DEFAULTS.liveReadActiveOnly).volatile(),
+  overlapLive: z.boolean().default(DEFAULTS.overlapLive).volatile(),
+  liveReadMaxQueue: z.number().min(1).max(20).default(DEFAULTS.liveReadMaxQueue).volatile(),
+  debugLog: z.boolean().default(DEFAULTS.debugLog).volatile(),
 })
 
-/** 接入 settings：有服务则 Web 设置页可改（live 生效），无服务则 entry 配置照常。 */
+/** 0.2.0 起 settings 服务按 entry 导出的 Config schema 自动生成 Web 设置页（无 register()）。 */
+export const Config = VoiceAnnouncerSettings
+
+/** 接入 settings：0.2.0 起无 register()，改动经 settings/document-updated 事件通知后从 describe() 重读合并进 cfg（live 生效）；无 settings 服务时 entry 配置照常。 */
 function installVoiceSettings(ctx: AppContext, cfg: ConfigType, entry: Partial<ConfigType>, log: (m: string) => void): void {
   // 把当前解析值合并进 cfg；音色池非数组时兜底为空（= 全部音色）
-  const sync = (source: () => ConfigType): void => {
+  const sync = (cur: unknown): void => {
     try {
-      const cur = source()
-      if (cur && typeof cur === 'object') Object.assign(cfg, cur)
+      if (cur && typeof cur === 'object') Object.assign(cfg, unwrapConfig(cur as object))
       if (!Array.isArray(cfg.voices)) cfg.voices = []
     } catch { /* 设置读取失败时保持 entry 配置 */ }
   }
-  ctx.inject(['settings'], (settingsCtx) => {
-    const scope: SettingsScope<ConfigType> = settingsCtx.settings.register('voice-announcer', VoiceAnnouncerSettings, {
-      base: { ...DEFAULTS, ...entry },
-    })
-    const source = (): ConfigType => scope.get()
-    // 立即生效一次：设置文档已保存的用户配置（如 voices）启动即同步进 cfg，
-    // 避免 watch 生效前（apply 后的一瞬）用 DEFAULTS/patch 配置分配音色
-    sync(source)
-    scope.watch(() => {
-      sync(source)
+  let applyDocument = (): void => { /* 占位，注入 settings 后替换 */ }
+  ctx.inject(['settings'], (settingsCtx: any) => {
+    applyDocument = (): void => {
+      try {
+        const desc = settingsCtx.settings.describe().find((d: any) => d.ns === 'voice-announcer')
+        sync(desc?.value)
+      } catch { /* settings 未就绪时保持 entry 配置 */ }
+    }
+    // 启动即同步一次：设置文档已保存的用户配置（如 voices）立即生效
+    applyDocument()
+    settingsCtx.on('settings/document-updated', (ns: any) => {
+      if (ns !== 'voice-announcer') return
+      applyDocument()
       log('设置已更新（即时生效）: engine=' + cfg.engine + ' 音色池=' + (cfg.voices.length === 0 ? '全部(' + CHINESE_VOICES.length + ')' : cfg.voices.length + ' 个') + ' enabled=' + cfg.enabled)
     })
   })
@@ -425,7 +448,7 @@ function installVoiceSettings(ctx: AppContext, cfg: ConfigType, entry: Partial<C
 
 export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   try { appendFileSync(BOOT_LOG, '[' + new Date().toISOString() + '] APPLY v5\n') } catch {}
-  const cfg: ConfigType = { ...DEFAULTS, ...config }
+  const cfg: ConfigType = { ...DEFAULTS, ...unwrapConfig(config) }
   // 音色池规范化：过滤非法项；空数组 = 全部中文音色（默认状态，用户未筛选时全量轮转）。
   // 旧版 voice 字段（string 且非 auto）迁移为单音色池，尊重旧选择。
   const rawVoices = Array.isArray(cfg.voices) ? cfg.voices.filter((v: unknown) => typeof v === 'string' && v) : []

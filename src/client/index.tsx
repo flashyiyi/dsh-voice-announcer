@@ -1,19 +1,21 @@
 /**
  * dsh-voice-announcer — client 配置卡片。
- * 注册 settings.plugin.item（key=voice-announcer）。样式复刻官方
+ * 注册 settings.general.item（id=voice-announcer）。样式复刻官方
  * ui-settings-plugins 的 PluginCard + fields（CSS 变量一致）。
+ * 配置读写走 ctx.configForms（0.2.0 取代了 0.1.x 的 ctx.settingsScope；
+ * 命名空间 = host entry id `voice-announcer`）。
  * 音色：中文音色勾选池；新会话按勾选顺序轮转分配（host 端持久化）。
  */
 import { useEffect, useRef, useState } from 'react'
 import type { SlotsService } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SettingsScope, SettingsScopeBinder } from '@deepseek-ai/dsh-client-ui-settings'
+import type { ConfigForm, ConfigForms } from '@deepseek-ai/dsh-client-ui-settings/client'
 
 type ClientContext = {
   slots: SlotsService
-  settingsScope: SettingsScopeBinder
+  configForms: ConfigForms
 }
 
-export const inject = ['slots', 'settingsScope', 'sessions']
+export const inject = ['slots', 'configForms', 'sessions']
 
 export const name = 'dsh-voice-announcer'
 
@@ -94,9 +96,9 @@ const v = {
   err: 'var(--dsw-alias-label-error)',
 }
 
-function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings> }) {
-  const { scope } = props
-  const [snap, setSnap] = useState(scope.getSnapshot())
+function VoiceAnnouncerCard(props: { form: ConfigForm<VoiceAnnouncerSettings> }) {
+  const { form } = props
+  const [snap, setSnap] = useState(form.getSnapshot())
   const [open, setOpen] = useState(false)
   // 草稿：字段名 → 待写值；null 表示 clear。
   const [draft, setDraft] = useState<Record<string, unknown | null>>({})
@@ -107,7 +109,7 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
   const dirtyRef = useRef(false)
   dirtyRef.current = Object.keys(draft).length > 0
 
-  useEffect(() => scope.subscribe(() => { setSnap(scope.getSnapshot()) }), [scope])
+  useEffect(() => form.subscribe(() => { setSnap(form.getSnapshot()) }), [form])
 
   const value = (snap.status === 'ready' ? snap.value : {}) as Partial<VoiceAnnouncerSettings>
   const user = (snap.status === 'ready' ? snap.user : undefined) as Record<string, unknown> | undefined
@@ -157,8 +159,8 @@ function VoiceAnnouncerCard(props: { scope: SettingsScope<VoiceAnnouncerSettings
     setSaving(true)
     const writes: Promise<void>[] = []
     for (const [field, val] of Object.entries(draft)) {
-      if (val === null || val === undefined) writes.push(scope.unset(field))
-      else writes.push(scope.set(field, val))
+      if (val === null || val === undefined) writes.push(form.unset(field))
+      else writes.push(form.set(field, val))
     }
     void Promise.all(writes).then(() => {
       setDraft({})
@@ -388,14 +390,16 @@ export function apply(ctx: ClientContext): void {
     }
   } catch { /* sessions 不可用：activeOnly 判定回退（host 端无 activeSessionId 时不念） */ }
 
-  const scope = ctx.settingsScope.bind<VoiceAnnouncerSettings>({ namespace: NS })
+  // 0.2.0：设置命名空间 = host entry id（不再由插件自定义），配置读写走 configForms。
+  const form = ctx.configForms.get<VoiceAnnouncerSettings>(NS)
 
-  ctx.effect(() => ctx.slots.inject('settings.plugin.item', () =>
+  // 0.2.0 移除了 settings.plugin.item；本卡片改挂到 General 区的一行。
+  ctx.effect(() => ctx.slots.inject('settings.general.item', () =>
     ctx.slots.register({
-      name: 'settings.plugin.item',
-      key: NS,
-      label: () => '语音播报',
-      inject: () => ({ scope }),
+      name: 'settings.general.item',
+      id: NS,
+      order: 95,
+      inject: () => ({ form }),
     }, VoiceAnnouncerCard as never),
   ), 'voice-announcer: settings card')
 }
