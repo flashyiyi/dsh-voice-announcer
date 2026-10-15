@@ -10,10 +10,10 @@ DSH（DeepSeek Harness）语音播报插件：监听每个会话的 `turn/end` �
 - **会话独立音色**：每个会话从勾选的音色池中按索引轮转分配一个中文音色并固定，新会话自动错开，跨重启保持
 - **音色筛选**：在设置界面勾选 14 个中文音色中的任意子集；只勾 1 个 = 全会话一种声音
 - **子代理可控**：子代理（subagent）会话默认静默，一键开启即可一并播报
-- **实时朗读**：回复生成过程中按句朗读（edge-tts，句子缓冲、预合成无缝衔接）；可只读当前活动会话，追不上时自动跳到最新内容
+- **实时朗读**：回复生成过程中按句朗读（两种引擎都支持：edge-tts 网络流式 + 预合成无缝衔接，sapi 本地发声）；可只读当前活动会话，追不上时自动跳到最新内容
 - **Web 设置界面**：在 设置 → 插件配置 中完成全部配置，保存后即时生效，无需改配置文件
 - **音色试听**：每个音色行都有「试听」按钮，按当前语速与音调合成示例语音
-- **双引擎**：edge-tts（神经网络音质，需联网）/ sapi（Windows 本地语音，离线可用）
+- **双引擎**：edge-tts（神经网络音质，需联网）/ sapi（Windows 本地语音，离线可用）；edge-tts 连不上微软时**自动降级 sapi**，不会再出现完全没声音
 - **流式播放**：边合成边播放，无临时文件、无转码；首字约 0.6 秒内出声
 - **并发安全**：每次播报相互独立；多会话同时完成互不干扰、不丢播报
 
@@ -52,9 +52,13 @@ dsh plugin --profile web add dsh-voice-announcer
     announceError: true
     announceSubagent: false  # 是否播报子代理会话
     announceWait: true       # 会话在等你时播报（提问 / 计划审阅 / 审批提权）
-    liveRead: true           # 实时朗读：回复生成时边出边念（仅 edge-tts）
+    liveRead: true           # 实时朗读：回复生成时边出边念（两种引擎均支持）
     liveReadActiveOnly: false # 只朗读当前活动会话
     liveReadMaxQueue: 5      # 跟读跳跃阈值（待念队列句数）
+    sapiVoice: ''            # sapi 系统音色名，如 Microsoft Huihui（'' = 系统默认）
+    sapiRate: 0              # sapi 语速档，-10（最慢）~ +10（最快）
+    sapiVolume: 100          # sapi 音量，0 ~ 100
+    autoFallbackSapi: true   # edge-tts 连不上微软时自动降级本地 sapi
 ```
 
 ### 配置项
@@ -62,7 +66,7 @@ dsh plugin --profile web add dsh-voice-announcer
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | enabled | true | 总开关 |
-| engine | edge-tts | 播报引擎；选择 sapi 时音色/语速/音调控件自动禁用 |
+| engine | edge-tts | 播报引擎。两种引擎都支持实时朗读；音色/语速/音调为 edge-tts 专属，sapi* 为 sapi 专属 |
 | voices | [] | 音色池（edge-tts 中文音色）。新会话按索引轮转从池中分配一个并固定；空 = 全部 14 个中文音色（默认）；只 1 个 = 全会话一种声音 |
 | rate | +0% | 语速（edge-tts），滑杆 -50% ~ +50% |
 | pitch | +0Hz | 音调（edge-tts），滑杆 -50Hz ~ +50Hz |
@@ -70,10 +74,14 @@ dsh plugin --profile web add dsh-voice-announcer
 | announceError | true | 出错、中止、截断时播报 |
 | announceSubagent | false | 是否播报子代理会话 |
 | announceWait | true | 会话挂起等你回应时播报：向你提问、计划待审阅、审批/提权请求 |
-| liveRead | true | 实时朗读：回复按句边出边念（仅 edge-tts） |
+| liveRead | true | 实时朗读：回复按句边出边念（edge-tts 走网络流式，sapi 本地发声） |
 | liveReadActiveOnly | false | 只朗读当前活动会话（浏览器自动上报） |
 | overlapLive | true | 多会话重叠朗读：默认开启 = 不同音色的会话可同时朗读（同会话仍串行）；关闭 = 全局单队列，同一时间只念一个会话 |
 | liveReadMaxQueue | 5 | 跟读跳跃：待念队列超过此句数时丢弃旧文本、跳到最新内容 |
+| sapiVoice | （空） | sapi 系统音色名（如 Microsoft Huihui）。空 = 系统默认。可用 `voice_health` 查看已安装音色 |
+| sapiRate | 0 | sapi 语速档：-10（最慢）~ +10（最快），0 为正常 |
+| sapiVolume | 100 | sapi 音量：0 ~ 100 |
+| autoFallbackSapi | true | edge-tts 连不上微软（403 / 断网）时自动改用本地 sapi 朗读，避免完全没声音 |
 
 ## 音色（edge-tts，14 个中文音色）
 
@@ -93,7 +101,7 @@ dsh plugin --profile web add dsh-voice-announcer
 - 子代理会话默认不播报（可通过 `announceSubagent` 开启）
 - 每个会话固定使用分配到的音色直至会话结束；升级前已朗读过的会话保留旧单音色行为
 - 实时朗读默认多会话重叠（不同音色的会话可同时朗读，同会话仍串行）；将「多会话重叠朗读」关闭后回退全局单队列（同一时间只念一个会话）
-- 每次播报边合成边流式播放，无临时文件、无转码；ffplay 缺失时自动降级 SAPI
+- 每次播报边合成边流式播放，无临时文件、无转码；ffplay 缺失、或 edge-tts 连不上微软时自动降级 SAPI
 - 会话挂起等你回应时（向你提问 / 计划待审阅 / 审批提权请求）会用该会话音色播报一句提示，只打断该会话的实时朗读（`announceWait` 控制）
 - 出错时附带错误信息（截取前 60 字）；中止时区分「你中止」与「父代理中止」
 
@@ -108,6 +116,7 @@ npx tsdown
 
 ## 更新记录
 
+- **0.1.14** — 修复微软端点迁移：2026-10 起旧域名 `speech.platform.bing.com` 在多地返回 HTTP 403，合成改用新域名 `api.msedgeservices.com` 并以 `Ocp-Apim-Subscription-Key` 传令牌，旧域名保留为兜底。新增 **edge-tts 失败自动降级 sapi**（403 / 断网 / ffplay 缺失均覆盖），不会再出现完全没声音。**sapi 支持实时朗读**（原先仅 edge-tts），改用常驻本地进程，免去每句 PowerShell 冷启动。新增配置：`sapiVoice`、`sapiRate`、`sapiVolume`、`autoFallbackSapi`。
 - **0.1.7** — 性能修复：会话标题读取不再走 `sessionProjections.snapshot()`——该调用会对超大会话（百万级事件 × 每个注册投影 key）同步做全量 fold，曾导致 DSH 服务端定期完全卡住（冻结数秒到分钟级后自动恢复）。现在改为轻量反向扫描最近的 `session/title` 事件取标题，播报标题不再触发全量投影。
 
 ## License

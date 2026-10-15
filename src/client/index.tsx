@@ -35,6 +35,10 @@ interface VoiceAnnouncerSettings {
   liveReadActiveOnly?: boolean
   liveReadMaxQueue?: number
   debugLog?: boolean
+  sapiRate?: number
+  sapiVolume?: number
+  sapiVoice?: string
+  autoFallbackSapi?: boolean
 }
 
 /** 内置中文音色（与 host CHINESE_VOICES 同序）：普通话 6 + 方言 2 + 粤语 3 + 台湾 3。 */
@@ -55,7 +59,7 @@ const VOICES: { id: string; name: string; gender: string; region: string }[] = [
   { id: 'zh-TW-YunJheNeural', name: '雲哲', gender: '男', region: '台湾' },
 ]
 
-type FieldType = 'bool' | 'select' | 'slider' | 'number' | 'voices'
+type FieldType = 'bool' | 'select' | 'slider' | 'number' | 'voices' | 'text'
 interface FieldDef {
   key: keyof VoiceAnnouncerSettings
   label: string
@@ -69,15 +73,19 @@ interface FieldDef {
 }
 const FIELDS: FieldDef[] = [
   { key: 'enabled', label: '启用播报', hint: '关闭后不再播报任何对话结束通知', type: 'bool' },
-  { key: 'engine', label: '播报引擎', hint: 'edge-tts：神经网络音质，需联网与 ffplay（随 ffmpeg 安装）；sapi：Windows 本地语音，离线可用', type: 'select', options: ['edge-tts', 'sapi'] },
+  { key: 'engine', label: '播报引擎', hint: 'edge-tts：神经网络音质，需联网与 ffplay（随 ffmpeg 安装）；sapi：Windows 本地语音，离线可用。两种引擎均支持实时朗读', type: 'select', options: ['edge-tts', 'sapi'] },
   { key: 'voices', label: '音色池', hint: '勾选可用的中文音色；每个会话按勾选顺序轮转分配一个音色并固定。不勾选 = 全部音色（默认）；只勾 1 个 = 全会话一种声音', type: 'voices' },
   { key: 'rate', label: '语速', hint: '相对正常语速的偏移（-50% ~ +50%）', type: 'slider', min: -50, max: 50, step: 5, suffix: '%' },
   { key: 'pitch', label: '音调', hint: '相对正常音调的偏移（-50Hz ~ +50Hz）', type: 'slider', min: -50, max: 50, step: 5, suffix: 'Hz' },
+  { key: 'sapiVoice', label: 'SAPI 音色', hint: 'Windows 系统音色名（如 Microsoft Huihui）；留空 = 系统默认。可用 voice_health 查看已安装音色', type: 'text' },
+  { key: 'sapiRate', label: 'SAPI 语速', hint: '本地语音语速档：-10 最慢 ~ +10 最快，0 为正常', type: 'number', min: -10, max: 10, step: 1 },
+  { key: 'sapiVolume', label: 'SAPI 音量', hint: '本地语音音量（0 ~ 100）', type: 'number', min: 0, max: 100, step: 5 },
+  { key: 'autoFallbackSapi', label: '失败自动降级 SAPI', hint: 'edge-tts 连不上微软服务器（403/断网）时自动改用本地 SAPI 朗读，避免完全没声音', type: 'bool' },
   { key: 'announceCompleted', label: '完成时播报', hint: '对话正常结束时播报', type: 'bool' },
   { key: 'announceError', label: '出错时播报', hint: '出错、中止、截断等异常结束时播报', type: 'bool' },
   { key: 'announceSubagent', label: '子任务也播报', hint: '子代理（subagent）会话默认不播报，开启后一并播报', type: 'bool' },
   { key: 'announceWait', label: '等待回应时播报', hint: '会话在等你时语音提醒：向你提问、计划待审阅、审批/提权请求', type: 'bool' },
-  { key: 'liveRead', label: '实时朗读', hint: '生成回复时边出边念（仅 edge-tts，逐句合成流式播放，无需等待完整回复）', type: 'bool' },
+  { key: 'liveRead', label: '实时朗读', hint: '生成回复时边出边念（逐句合成播放，无需等待完整回复）；edge-tts 流式、sapi 本地发声', type: 'bool' },
   { key: 'liveReadActiveOnly', label: '仅当前活动会话', hint: '只朗读当前正在查看的会话；关闭则所有会话的回复都实时朗读', type: 'bool' },
   { key: 'overlapLive', label: '多会话重叠朗读', hint: '不同会话使用不同音色，可同时朗读互不打断；默认关闭 = 同一时间只念一个会话', type: 'bool' },
   { key: 'liveReadMaxQueue', label: '跳跃阈值', hint: '待念队列超过此句数时丢弃旧文本、跳到最新内容（实时朗读追不上时）', type: 'number', min: 1, max: 10, step: 1, suffix: '句' },
@@ -124,13 +132,15 @@ function VoiceAnnouncerCard(props: { form: ConfigForm<VoiceAnnouncerSettings> })
   const overridden = (field: FieldDef): boolean =>
     draft[field.key] !== undefined || (user !== undefined && field.key in user)
   /** 当前引擎（草稿优先）。 */
-  const engine = String(fieldValue(FIELDS[1]) ?? 'edge-tts')
-  /** sapi 引擎：不支持 voices/rate/pitch（SAPI 用系统语音）；实时朗读仅 edge-tts。 */
+  const byKey = (k: keyof VoiceAnnouncerSettings): FieldDef | undefined => FIELDS.find(f => f.key === k)
+  const engine = String(fieldValue(byKey('engine') as FieldDef) ?? 'edge-tts')
+  /** sapi 引擎用系统语音（voices/rate/pitch 不适用）；实时朗读两种引擎都支持。 */
   const engineIsSapi = engine === 'sapi'
-  const liveReadOn = fieldValue(FIELDS[8]) === true
+  const liveReadOn = fieldValue(byKey('liveRead') as FieldDef) === true
   const fieldDisabled = (field: FieldDef): boolean => {
     if (!writable) return true
-    if (engineIsSapi && (field.key === 'voices' || field.key === 'rate' || field.key === 'pitch' || field.key === 'liveRead' || field.key === 'liveReadActiveOnly')) return true
+    if (engineIsSapi && (field.key === 'voices' || field.key === 'rate' || field.key === 'pitch')) return true
+    if (!engineIsSapi && (field.key === 'sapiVoice' || field.key === 'sapiRate' || field.key === 'sapiVolume' || field.key === 'autoFallbackSapi')) return true
     if ((field.key === 'liveReadActiveOnly' || field.key === 'liveReadMaxQueue') && liveReadOn !== true) return true
     return false
   }
@@ -180,8 +190,8 @@ function VoiceAnnouncerCard(props: { form: ConfigForm<VoiceAnnouncerSettings> })
   const previewVoice = (voice: string): void => {
     const prev = previewRef.current
     if (prev) { try { prev.pause() } catch { /* 忽略 */ } previewRef.current = null }
-    const rate = String(fieldValue(FIELDS[3]) ?? '+0%')
-    const pitch = String(fieldValue(FIELDS[4]) ?? '+0Hz')
+    const rate = String(fieldValue(byKey('rate') as FieldDef) ?? '+0%')
+    const pitch = String(fieldValue(byKey('pitch') as FieldDef) ?? '+0Hz')
     setPreviewing(true)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 10000)
@@ -195,6 +205,11 @@ function VoiceAnnouncerCard(props: { form: ConfigForm<VoiceAnnouncerSettings> })
         })
         clearTimeout(timer)
         if (!resp.ok) { setPreviewing(false); return }
+        // sapi 引擎：服务端直接本地发声，返回 JSON（无音频流）
+        if ((resp.headers.get('content-type') ?? '').includes('application/json')) {
+          setPreviewing(false)
+          return
+        }
         const blob = await resp.blob()
         const url = URL.createObjectURL(blob)
         const a = new Audio(url)
@@ -265,8 +280,12 @@ function VoiceAnnouncerCard(props: { form: ConfigForm<VoiceAnnouncerSettings> })
                               disabled={fieldDisabled(field)}
                               value={String(cur ?? '')}
                               onChange={(e) => {
-                                const v = Number(e.target.value)
-                                if (Number.isFinite(v) && v >= (field.min ?? 1)) stage(field.key as string, v)
+                                const n = Number(e.target.value)
+                                if (!Number.isFinite(n)) return
+                                const lo = field.min ?? 0
+                                const hi = field.max ?? Number.POSITIVE_INFINITY
+                                const clamped = Math.min(hi, Math.max(lo, n))
+                                stage(field.key as string, clamped)
                               }}
                               style={{ ...inputBase, width: 96 }} />
                             {field.suffix
@@ -303,6 +322,14 @@ function VoiceAnnouncerCard(props: { form: ConfigForm<VoiceAnnouncerSettings> })
                               ? <p style={{ margin: '4px 0 0', fontSize: 12, lineHeight: '1.5', color: v.label3 }}>{'未勾选任何音色：使用全部 ' + VOICES.length + ' 个音色（默认状态）'}</p>
                               : null}
                           </div>
+                        )
+                      : field.type === 'text'
+                        ? (
+                          <input type="text" disabled={fieldDisabled(field)}
+                            value={String(cur ?? '')}
+                            placeholder="留空 = 系统默认"
+                            onChange={(e) => stage(field.key as string, e.target.value)}
+                            style={inputBase} />
                         )
                       : field.type === 'slider'
                         ? (

@@ -10,10 +10,10 @@ A voice announcement plugin for DSH (DeepSeek Harness). It listens for each sess
 - **Per-session voices** — each session is assigned a Chinese voice from your checked pool (all 14 by default), rotating by index so new sessions differ; the assignment is fixed and persists across restarts
 - **Voice filtering** — check any subset of the 14 Chinese voices in the settings UI; checking one voice means every session uses that single voice
 - **Subagent control** — subagent sessions are silent by default; enable them with one toggle
-- **Live reading** — while a reply streams in, sentences are spoken as they complete (edge-tts, sentence-buffered, pre-synthesized for gapless playback); optionally restrict to the currently active session only, with catch-up jumping when the reading falls behind
+- **Live reading** — while a reply streams in, sentences are spoken as they complete (both engines: edge-tts streams and pre-synthesizes for gapless playback, sapi speaks locally); optionally restrict to the currently active session only, with catch-up jumping when the reading falls behind
 - **Web settings UI** — configure everything in Settings → Plugin configuration; changes apply live, no config-file editing
 - **Voice preview** — every voice row has a "Preview" button that synthesizes a sample with the current rate and pitch
-- **Two engines** — edge-tts (neural voices, requires network) or sapi (offline Windows voices)
+- **Two engines** — edge-tts (neural voices, requires network) or sapi (offline Windows voices); **automatic fallback** to sapi when edge-tts cannot reach Microsoft, so you never end up with silence
 - **Streaming playback** — audio plays as it is synthesized (no temp files, no conversion); the first syllable arrives within ~0.6s
 - **Concurrency-safe** — each announcement is independent; concurrent sessions never drop or interfere with announcements
 
@@ -52,9 +52,13 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
     announceError: true
     announceSubagent: false  # announce subagent sessions too
     announceWait: true       # speak when a session waits for you (question / plan review / approval request)
-    liveRead: true           # live-read replies as they stream in (edge-tts only)
+    liveRead: true           # live-read replies as they stream in (both engines)
     liveReadActiveOnly: false # live-read only the currently active session
     liveReadMaxQueue: 5      # catch-up jump threshold (pending sentences)
+    sapiVoice: ''            # sapi system voice name, e.g. Microsoft Huihui ('' = system default)
+    sapiRate: 0              # sapi speech rate, -10 (slowest) ~ +10 (fastest)
+    sapiVolume: 100          # sapi volume, 0 ~ 100
+    autoFallbackSapi: true   # fall back to local sapi when edge-tts cannot reach Microsoft
 ```
 
 ### Options
@@ -62,7 +66,7 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 | Option | Default | Description |
 | --- | --- | --- |
 | enabled | true | Master switch |
-| engine | edge-tts | Engine; voice/rate/pitch controls are disabled when sapi is selected |
+| engine | edge-tts | Engine. Both engines support live reading; the voice/rate/pitch controls are edge-tts-specific and the sapi* options are sapi-specific |
 | voices | [] | Voice pool (edge-tts Chinese voices). New sessions pick one by round-robin index from this pool and keep it. Empty = all 14 Chinese voices (default); one entry = every session uses that single voice |
 | rate | +0% | Speech rate (edge-tts), slider -50% ~ +50% |
 | pitch | +0Hz | Speech pitch (edge-tts), slider -50Hz ~ +50Hz |
@@ -70,10 +74,14 @@ Append the following to `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 | announceError | true | Announce errors, aborts, and truncations |
 | announceSubagent | false | Announce subagent sessions too |
 | announceWait | true | Speak when a session pauses waiting for you: it asks a question, presents a plan for review, or requests approval |
-| liveRead | true | Live-read replies sentence by sentence while they stream (edge-tts only) |
+| liveRead | true | Live-read replies sentence by sentence while they stream (edge-tts streams from the network, sapi speaks locally) |
 | liveReadActiveOnly | false | Live-read only the currently active session (the browser reports it) |
 | overlapLive | true | Overlap live-reading across sessions: on (default) = sessions with different voices can speak simultaneously (same session still serial); off = one session speaks at a time (global queue) |
 | liveReadMaxQueue | 5 | Catch-up jump: when the pending queue exceeds this many sentences, drop the stale ones and jump to the latest content |
+| sapiVoice | (empty) | sapi system voice name (e.g. Microsoft Huihui). Empty = system default. Use `voice_health` to list installed voices |
+| sapiRate | 0 | sapi speech rate: -10 (slowest) ~ +10 (fastest), 0 = normal |
+| sapiVolume | 100 | sapi volume: 0 ~ 100 |
+| autoFallbackSapi | true | When edge-tts cannot reach Microsoft (403 / offline), automatically speak through local sapi instead of going silent |
 
 ## Voices (edge-tts, 14 Chinese voices)
 
@@ -93,7 +101,7 @@ All voices are Chinese (Mandarin / dialects / Cantonese / Taiwanese) — every e
 - Subagent sessions are not announced by default (enable via `announceSubagent`)
 - Each session keeps its assigned voice until the session ends; a session that already spoke before an upgrade keeps its previous single-voice behavior
 - Live reading overlaps across sessions by default — sessions with different voices can read aloud simultaneously (same session stays serial). Set **overlapLive** to false to fall back to a single global queue (one session speaks at a time)
-- Each announcement is synthesized and streamed straight to the player — no temp files, no conversion; if ffplay is missing it falls back to SAPI
+- Each announcement is synthesized and streamed straight to the player — no temp files, no conversion; if ffplay is missing, or edge-tts cannot reach Microsoft, it falls back to SAPI
 - When a session pauses waiting for you — it asks a question, presents a plan for review, or requests approval — a prompt is spoken with that session's voice, interrupting only that session's live reading (control via `announceWait`)
 - Error messages are included (truncated to 60 characters); aborts distinguish "by you" from "by the parent agent"
 
@@ -108,6 +116,7 @@ npx tsdown
 
 ## Changelog
 
+- **0.1.14** — Fixed the Microsoft endpoint migration (October 2026 broke the old `speech.platform.bing.com` host in many regions with HTTP 403). Synthesis now uses the new `api.msedgeservices.com` host with the `Ocp-Apim-Subscription-Key` parameter, keeping the legacy host as a fallback. Added **automatic sapi fallback** on any edge-tts failure (403 / network / missing ffplay) so announcements never go silent. **sapi now supports live reading** (previously edge-tts only), using a persistent local process to avoid per-sentence PowerShell startup. New settings: `sapiVoice`, `sapiRate`, `sapiVolume`, `autoFallbackSapi`.
 - **0.1.7** — Performance fix: the session-title lookup no longer calls `sessionProjections.snapshot()`, which synchronously folds the entire event log of a huge session (millions of events × every registered projection key) and can freeze the DSH web server for seconds to minutes. Titles are now read with a lightweight reverse scan for the latest `session/title` event.
 
 ## License

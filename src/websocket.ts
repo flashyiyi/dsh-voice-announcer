@@ -57,7 +57,7 @@ function buildClientFrame(opcode: number, payload: Buffer): Buffer {
  * 建立 WebSocket 连接（自定义 headers 握手）。
  * 事件：open / message({data: string|Buffer}) / close / error。
  */
-export function createWebSocket(url: URL, headers: Record<string, string>): WsSocket {
+export function createWebSocket(url: URL, headers: Record<string, string>, fallbackUrl?: string): WsSocket {
   // 宽松 bucket：泛型 K 下索引访问无法精化槽位类型，内部一律 unknown[] + 断言桥接
   const listeners: Record<string, unknown[]> = {}
   const emit = (type: string, ...args: unknown[]): void => {
@@ -65,18 +65,12 @@ export function createWebSocket(url: URL, headers: Record<string, string>): WsSo
   }
   const key = randomBytes(16).toString('base64')
   // https.request 只接受 https: 协议；wss: 与 https: 底层同为 TLS，仅协议名不同
-  const httpUrl = new URL(url.href)
-  httpUrl.protocol = 'https:'
-  const req = request(httpUrl, {
-    method: 'GET',
-    headers: {
-      Upgrade: 'websocket',
-      Connection: 'Upgrade',
-      'Sec-WebSocket-Key': key,
-      'Sec-WebSocket-Version': '13',
-      ...headers,
-    },
-  })
+  const toHttps = (u: URL): URL => { const h = new URL(u.href); h.protocol = 'https:'; return h }
+  // 候选端点：主端点握手失败（403 等）时自动回退备用端点，不在超时上干等
+  const candidates: URL[] = [toHttps(url)]
+  if (fallbackUrl !== undefined) candidates.push(toHttps(new URL(fallbackUrl)))
+  let attempt = 0
+  let req: ReturnType<typeof request> | undefined
   let socket: Duplex | undefined
   // 分片重组缓冲
   let buffer: Buffer = Buffer.alloc(0)
@@ -118,7 +112,7 @@ export function createWebSocket(url: URL, headers: Record<string, string>): WsSo
     // 未知 opcode 忽略
   }
 
-  req.on('upgrade', (res: IncomingMessage, sock: Duplex) => {
+  const onUpgrade = (res: IncomingMessage, sock: Duplex): void => {
     // 校验 Sec-WebSocket-Accept（可选但稳妥）
     const accept = res.headers['sec-websocket-accept']
     const expected = createHash('sha1').update(key + WS_GUID).digest('base64')
@@ -172,15 +166,56 @@ export function createWebSocket(url: URL, headers: Record<string, string>): WsSo
       }
     })
     emit('open')
-  })
-  req.on('error', (err: Error) => {
+  }
+
+  /** 尝试下一个候选端点；用完则报错关闭。 */
+  const tryNext = (reason: string): void => {
+    attempt += 1
+    if (attempt < candidates.length) {
+      connect()
+      return
+    }
     if (!closed) {
       closed = true
-      emit('error', { message: err.message })
+      emit('error', { message: reason })
       emit('close')
     }
-  })
-  req.end()
+  }
+
+  const connect = (): void => {
+    const target = candidates[attempt] as URL
+    let current: ReturnType<typeof request>
+    current = request(target, {
+      method: 'GET',
+      headers: {
+        Upgrade: 'websocket',
+        Connection: 'Upgrade',
+        'Sec-WebSocket-Key': key,
+        'Sec-WebSocket-Version': '13',
+        ...headers,
+      },
+    })
+    req = current
+    current.on('upgrade', onUpgrade)
+    // 非 101 响应（403/401 等）：立即失败并回退，不等超时
+    current.on('response', (res: IncomingMessage) => {
+      try { current.destroy() } catch { /* 忽略 */ }
+      tryNext('WebSocket 握手被拒绝：HTTP ' + String(res.statusCode))
+    })
+    current.on('error', (err: Error) => {
+      if (closed) return
+      // 主端点网络类错误也回退；回退耗尽后再关闭
+      if (attempt + 1 < candidates.length) tryNext(err.message)
+      else if (!closed) {
+        closed = true
+        emit('error', { message: err.message })
+        emit('close')
+      }
+    })
+    current.end()
+  }
+
+  connect()
 
   return {
     send(data: string | Uint8Array): void {
@@ -194,7 +229,7 @@ export function createWebSocket(url: URL, headers: Record<string, string>): WsSo
           socket.write(buildClientFrame(OP_CLOSE, Buffer.alloc(0)))
           socket.end()
         } else {
-          req.destroy()
+          req?.destroy()
         }
       } catch { /* 忽略 */ }
       if (!closed) {

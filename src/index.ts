@@ -10,6 +10,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { synthesizeSpeech, synthesizeSpeechStream, closeConnectionPool } from './edge-tts.js'
+import { speakSapi as speakSapiProcess, closeSapi, estimateSapiMs } from './sapi.js'
 
 type AppContext = Context & { sessions: any; sessionProjections?: any; webServer?: any }
 
@@ -40,6 +41,14 @@ export interface Config {
   liveReadMaxQueue?: number
   /** 详细诊断日志（实时朗读/预合成/打断/跳跃等），默认关闭；关键事件（启动/异常/配置变更）始终记录 */
   debugLog?: boolean
+  /** sapi 语速档 -10..10（SAPI SpeechRate，0=正常） */
+  sapiRate?: number
+  /** sapi 音量 0..100 */
+  sapiVolume?: number
+  /** sapi 系统音色名（如 'Microsoft Huihui'）；空 = 系统默认 */
+  sapiVoice?: string
+  /** edge-tts 失败时自动降级到 sapi（离线兜底） */
+  autoFallbackSapi?: boolean
 }
 
 export type ConfigType = Required<Config>
@@ -88,6 +97,10 @@ const DEFAULTS: ConfigType = {
   overlapLive: true,
   liveReadMaxQueue: 5,
   debugLog: false,
+  sapiRate: 0,
+  sapiVolume: 100,
+  sapiVoice: '',
+  autoFallbackSapi: true,
 }
 
 const COMPLETED_KINDS = new Set(['completed', 'error', 'max-tokens', 'aborted', 'interrupted'])
@@ -332,11 +345,9 @@ function summarize(session: any, event: any, ctx?: AppContext, voice?: string): 
   return '这轮对话结束了'
 }
 
-/** SAPI 本地朗读（最可靠，离线，音质一般）。 */
-function speakSapi(text: string, log: (m: string) => void): void {
-  const ps = 'Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak($env:DSH_SPEAK_TEXT)'
-  const child = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], { stdio: 'ignore', windowsHide: true, env: { ...process.env, DSH_SPEAK_TEXT: text } })
-  child.on('error', (e) => log('SAPI spawn失败: ' + e.message))
+/** SAPI 本地朗读（常驻进程，离线可靠）。返回 kill 句柄以支持打断。 */
+function speakSapi(text: string, sapi: { sapiVoice: string; sapiRate: number; sapiVolume: number }, log: (m: string) => void, onDone?: () => void): () => void {
+  return speakSapiProcess({ text, voice: sapi.sapiVoice, rate: sapi.sapiRate, volume: sapi.sapiVolume }, log, onDone)
 }
 
 /** edge-tts 流式合成（内置协议，零依赖）→ ffplay 从 stdin 边收边播。
@@ -344,13 +355,23 @@ function speakSapi(text: string, log: (m: string) => void): void {
  * ffplay 不可用时降级 SAPI 播报。
  * 完成通知（onDone）：ffplay close 一律触发（播完/崩溃/合成失败/被打断），
  * finished 防重；句子播放队列靠它恢复，避免合成失败后 livePlaying 卡死。 */
-function speakEdgeTts(text: string, vcfg: { voice: string; rate: string; pitch: string }, log: (m: string) => void, instId?: string, onDone?: () => void): () => void {
+function speakEdgeTts(text: string, vcfg: { voice: string; rate: string; pitch: string }, log: (m: string) => void, instId?: string, onDone?: () => void, fallback?: { sapi: { sapiVoice: string; sapiRate: number; sapiVolume: number }; enabled: boolean }): () => void {
   let aborted = false
   let finished = false
+  let sapiStop: (() => void) | null = null
   const finish = (): void => {
     if (finished) return
     finished = true
     onDone?.()
+  }
+  /** edge-tts 不可用（403/网络/无 ffplay）时降级本地 SAPI；kill 句柄随之切换到 SAPI。 */
+  const degrade = (why: string): void => {
+    if (aborted) return
+    aborted = true
+    try { player.kill() } catch { /* 忽略 */ }
+    log('降级 SAPI 播报（' + why + '）')
+    if (fallback?.enabled !== false) sapiStop = speakSapi(text, fallback?.sapi ?? { sapiVoice: '', sapiRate: 0, sapiVolume: 100 }, log, finish)
+    else finish()
   }
   const player = spawn('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet', '-i', '-'], {
     stdio: ['pipe', 'ignore', 'pipe'],
@@ -359,10 +380,7 @@ function speakEdgeTts(text: string, vcfg: { voice: string; rate: string; pitch: 
   let stderrBuf = ''
   player.stderr?.on('data', (d: Buffer) => { stderrBuf += String(d) })
   player.on('error', (e) => {
-    aborted = true
-    log('ffplay 启动失败: ' + e.message + '（请安装 ffmpeg/ffplay，或切换引擎为 sapi）')
-    speakSapi(text, log)
-    finish()
+    degrade('ffplay 启动失败: ' + e.message + '，请安装 ffmpeg/ffplay')
   })
   player.stdin?.on('error', (e) => { log('播放输入流写入失败: ' + e.message) })
   synthesizeSpeechStream(
@@ -378,11 +396,9 @@ function speakEdgeTts(text: string, vcfg: { voice: string; rate: string; pitch: 
   ).then(() => {
     try { player.stdin?.end() } catch { /* 忽略 */ }
   }).catch((e) => {
-    aborted = true
-    log('合成失败: ' + (e instanceof Error ? e.message : String(e)))
-    try { player.kill() } catch { /* 忽略 */ }
-    // kill 触发 close → finish；极端情况 close 未触发时兜底
-    setTimeout(finish, 1000)
+    const msg = e instanceof Error ? e.message : String(e)
+    log('合成失败: ' + msg)
+    degrade(msg)
   })
   player.on('close', (code) => {
     if (code !== 0 && stderrBuf) log('播放异常 code=' + String(code) + ' ' + stderrBuf.trim().slice(0, 120))
@@ -392,6 +408,7 @@ function speakEdgeTts(text: string, vcfg: { voice: string; rate: string; pitch: 
   return () => {
     aborted = true
     try { player.kill() } catch { /* 忽略 */ }
+    if (sapiStop) { try { sapiStop() } catch { /* 忽略 */ } }
   }
 }
 
@@ -414,6 +431,10 @@ const VoiceAnnouncerSettings = z.object({
   overlapLive: z.boolean().default(DEFAULTS.overlapLive).volatile(),
   liveReadMaxQueue: z.number().min(1).max(20).default(DEFAULTS.liveReadMaxQueue).volatile(),
   debugLog: z.boolean().default(DEFAULTS.debugLog).volatile(),
+  sapiRate: z.number().min(-10).max(10).default(DEFAULTS.sapiRate).volatile(),
+  sapiVolume: z.number().min(0).max(100).default(DEFAULTS.sapiVolume).volatile(),
+  sapiVoice: z.string().default(DEFAULTS.sapiVoice).volatile(),
+  autoFallbackSapi: z.boolean().default(DEFAULTS.autoFallbackSapi).volatile(),
 })
 
 /** 0.2.0 起 settings 服务按 entry 导出的 Config schema 自动生成 Web 设置页（无 register()）。 */
@@ -552,6 +573,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
    * 预合成用短超时（8s）：网络抖动时快速失败，不阻塞实时朗读；
    * 连续失败 2 次自动降级为纯现场流式（每句首块 ~0.6s 出声，不哑）。 */
   function ensurePreSynth(log2: (m: string) => void): void {
+    if (cfg.engine === 'sapi') return // sapi 走常驻本地进程，无网络合成可预做
     if (cfg.overlapLive) return // 重叠模式：现场流式（首块 ~0.6s 出声），不做预合成
     if (preSynth || preFailed || preSynthDisabled || preReadyQueue.length >= 2) return
     const pending = liveQueue.length - preReadyQueue.length
@@ -587,6 +609,12 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
    * 多会话：默认重叠（不同会话并行，音色不同可区分）；overlapLive 关闭后回退
    * 全局串行（同一时间只念一个会话），同会话仍按队列顺序串行（不重叠）。重叠模式禁用预合成（现场流式）。
    * 总结播报（summaryPlaying）期间不播，等总结念完自动续上。 */
+  /** 实时朗读单句分派：sapi 引擎走常驻 SAPI 进程，否则 edge-tts（失败自动降级 sapi）。 */
+  function speakOne(text: string, voice: string, log2: (m: string) => void, next: () => void): () => void {
+    if (cfg.engine === 'sapi') return speakSapi(text, cfg, log2, next)
+    return speakEdgeTts(text, { voice, rate: cfg.rate, pitch: cfg.pitch }, log2, instId, next, { sapi: cfg, enabled: cfg.autoFallbackSapi })
+  }
+
   function pumpLive(log2: (m: string) => void): void {
     if (summaryPlaying || liveQueue.length === 0) return
     // ── 重叠模式（overlapLive=true）：跳过正在发声会话的句子，找第一个空闲会话的句子播
@@ -603,7 +631,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
         pumpLive(log2)
       }
       log2('实时朗读(重叠): ' + s.text.slice(0, 40))
-      kill = speakEdgeTts(s.text, { voice: s.voice, rate: cfg.rate, pitch: cfg.pitch }, log2, instId, next)
+      kill = speakOne(s.text, s.voice, log2, next)
       liveStops.add(kill)
       return
     }
@@ -631,10 +659,10 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     } else if (preFailed) {
       preFailed = false
       log2('实时朗读(预合成失败→现场流式): ' + s.text.slice(0, 40))
-      kill = speakEdgeTts(s.text, { voice: s.voice, rate: cfg.rate, pitch: cfg.pitch }, log2, instId, next)
+      kill = speakOne(s.text, s.voice, log2, next)
     } else {
       log2('实时朗读(现场合成): ' + s.text.slice(0, 40))
-      kill = speakEdgeTts(s.text, { voice: s.voice, rate: cfg.rate, pitch: cfg.pitch }, log2, instId, next)
+      kill = speakOne(s.text, s.voice, log2, next)
     }
     liveStops.add(kill)
     // 播放启动后立即预合成下一句（livePlaying 为 true，feedLive 的 ensurePreSynth 也会兜底）
@@ -723,13 +751,13 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     stopLiveRead(log2)
     log2('等待播报 kind=' + kind + ' 音色=' + vVoice + ' 文本=' + text.slice(0, 40))
     if (cfg.engine === 'sapi') {
-      speakSapi(text, log2)
+      speakSapi(text, cfg, log2)
     } else {
       summaryPlaying = true
       speakEdgeTts(text, { voice: vVoice, rate: cfg.rate, pitch: cfg.pitch }, log2, instId, () => {
         summaryPlaying = false
         pumpLive(log2)
-      })
+      }, { sapi: cfg, enabled: cfg.autoFallbackSapi })
     }
   }
   // 缓冲超时强制切句：模型输出停顿（>2s 无新 chunk）时，把未到边界的缓冲也念掉，
@@ -765,7 +793,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
   ;(ctx.on as any)('llm/stream', (options: any, next: any) => {
     const stream = next()
     try {
-      if (!cfg.enabled || !cfg.liveRead || cfg.engine !== 'edge-tts') return stream
+      if (!cfg.enabled || !cfg.liveRead) return stream
       const sid = String(options?.sessionId ?? '')
       if (!sid) return stream
       if (options?.purpose === 'compaction' || options?.purpose === 'session-title') return stream
@@ -783,6 +811,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
     for (const k of liveStops) { try { k() } catch { /* 忽略 */ } }
     liveStops.clear()
     closeConnectionPool()
+    closeSapi()
   })
 
   // 试听路由：POST /voice-announcer/preview {voice, text?} → 合成 mp3 返回（client 浏览器播放）
@@ -810,12 +839,20 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
         rate = String(body.rate ?? '+0%')
         pitch = String(body.pitch ?? '+0Hz')
       } catch {}
-      if (!voice) { res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }); res.end('voice 缺失'); return }
       if (!text) {
         const m2 = /^([a-z]{2,3})(-|$)/i.exec(voice || '')
         const lang = m2 ? m2[1].toLowerCase() : 'zh'
         text = PREVIEW_TEXTS[lang] ?? PREVIEW_TEXTS.zh
       }
+      // sapi 引擎：本地发声试听（无法返回 mp3），前端按 JSON 响应处理
+      if (cfg.engine === 'sapi') {
+        speakSapi(text, cfg, log)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{"ok":true,"engine":"sapi"}')
+        return
+      }
+      // edge-tts：voice 缺省用当前音色池首项（便于未指定时直接试听）
+      if (!voice) voice = (cfg.voices.length ? cfg.voices[0] : undefined) ?? DEFAULT_VOICE
       const buf: Buffer = await synthesizeSpeech({ text, voice, rate, pitch })
       res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': String(buf.length), 'cache-control': 'no-store' })
       res.end(buf)
@@ -876,7 +913,7 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       }
       // 实时朗读（旧版 DSH）：assistant/chunk 的 text-delta 增量 → 句子缓冲 → 流式播放（仅 edge-tts）。
       // 新版该事件已移除、流式改走 llm/stream（见下方监听）；此处仅在未观察到新通道时生效，避免重复念。
-      if (type === 'assistant/chunk' && !sawStreamChannel && cfg.enabled && cfg.liveRead && cfg.engine === 'edge-tts') {
+      if (type === 'assistant/chunk' && !sawStreamChannel && cfg.enabled && cfg.liveRead) {
         const chunk = event?.data?.chunk
         if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text) {
           // 子代理会话：遵循 announceSubagent
@@ -952,13 +989,13 @@ export function apply(ctx: AppContext, config: Partial<ConfigType> = {}): void {
       stopLiveRead(log)
       log('播报 turn=' + String(event?.data?.turn ?? '?') + ' 引擎=' + cfg.engine + ' 音色=' + vVoice + ' 文本=' + text.slice(0, 40));
       if (cfg.engine === 'sapi') {
-        speakSapi(text, log)
+        speakSapi(text, cfg, log)
       } else {
         summaryPlaying = true
         speakEdgeTts(text, { voice: vVoice, rate: cfg.rate, pitch: cfg.pitch }, log, instId, () => {
           summaryPlaying = false
           pumpLive(log)
-        })
+        }, { sapi: cfg, enabled: cfg.autoFallbackSapi })
       }
     } catch (e) {
       log('监听器异常: ' + (e instanceof Error ? e.message : String(e)))

@@ -8,7 +8,10 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { createWebSocket, type WsSocket } from './websocket.js'
 
 const TRUSTED_CLIENT_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4'
-const WS_BASE = 'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1'
+/** 旧端点：2026-10 起微软按地区返回 403，仅作 fallback。 */
+const WS_BASE_LEGACY = 'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1'
+/** 新端点：Edge 已迁移至此，客户端令牌改走 Ocp-Apim-Subscription-Key。 */
+const WS_BASE = 'wss://api.msedgeservices.com/tts/cognitiveservices/websocket/v1'
 const OUTPUT_FORMAT = 'audio-24khz-48kbitrate-mono-mp3'
 const SEC_MS_GEC_VERSION = '1-143.0.3650.75'
 const WIN_EPOCH_SECONDS = 11644473600
@@ -114,15 +117,16 @@ export async function synthesizeSpeechStream(
   if (text === '') throw new SynthesizeError('要合成的文本为空。')
   if (options.text.length > MAX_TEXT_LENGTH) throw new SynthesizeError('文本过长（超过 5000 字符），请分段合成。')
   const token = generateSecMsGec()
-  // 对齐 edge-tts 当前协议：Sec-MS-GEC 走 URL 查询参数，MUID 走 header
-  const url = WS_BASE
-    + '?TrustedClientToken=' + TRUSTED_CLIENT_TOKEN
+  // Sec-MS-GEC 走 URL 查询参数，MUID 走 header；令牌参数名两端点不同：
+  // 新端点只认 Ocp-Apim-Subscription-Key（传 TrustedClientToken 会 403）。
+  const buildUrl = (base: string, keyParam: string): string => base
+    + '?' + keyParam + '=' + TRUSTED_CLIENT_TOKEN
     + '&ConnectionId=' + randomUUID().replace(/-/g, '')
     + '&Sec-MS-GEC=' + token
     + '&Sec-MS-GEC-Version=' + SEC_MS_GEC_VERSION
   // 复用池中连接（同连接多次合成，免握手）；拿不到则新建
   const pooled = takePooled()
-  const socket = pooled ?? createWebSocket(new URL(url), { ...WSS_HEADERS, MUID: randomBytes(16).toString('hex').toUpperCase() })
+  const socket = pooled ?? createWebSocket(new URL(buildUrl(WS_BASE, 'Ocp-Apim-Subscription-Key')), { ...WSS_HEADERS, MUID: randomBytes(16).toString('hex').toUpperCase() }, buildUrl(WS_BASE_LEGACY, 'TrustedClientToken'))
   let done = false
   let receivedAudio = false
   let chainError: Error | undefined

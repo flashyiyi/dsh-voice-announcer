@@ -21,3 +21,7 @@
         overlapLive: true
         liveReadMaxQueue: 5
         debugLog: false
+        sapiVoice: ''
+        sapiRate: 0
+        sapiVolume: 100
+        autoFallbackSapi: true
